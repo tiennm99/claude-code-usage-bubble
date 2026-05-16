@@ -277,10 +277,12 @@ fn paint(hwnd: HWND, hdc: HDC) {
         let _ = DeleteObject(bg_brush);
 
         // 4-px accent stripe matching the bubble — same provider color so the
-        // identity carries across both surfaces.
-        let stripe_color = match data.model {
-            ProviderId::Claude => Color::from_hex("#D97757"),
-            ProviderId::ChatGpt => Color::from_hex("#10A37F"),
+        // identity carries across both surfaces. Codex is theme-aware so a
+        // pure white stripe doesn't vanish into the light-mode background.
+        let stripe_color = match (data.model, data.is_dark) {
+            (ProviderId::Claude, _) => Color::from_hex("#D97757"),
+            (ProviderId::ChatGpt, true) => Color::from_hex("#FFFFFF"),
+            (ProviderId::ChatGpt, false) => Color::from_hex("#2A2A2A"),
         };
         let stripe_w = scaled(4);
         let stripe_rect = RECT {

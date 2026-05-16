@@ -1061,7 +1061,7 @@ fn render(hwnd: HWND) {
         pixels.fill(0);
 
         paint_background(pixels, &layout, &inputs);
-        paint_accent_stripe(pixels, &layout, inputs.model);
+        paint_accent_stripe(pixels, &layout, inputs.model, inputs.is_dark);
         paint_bars(pixels, &layout, &inputs);
         paint_text_layer(mem_dc, &layout, &inputs);
 
@@ -1141,8 +1141,8 @@ fn row_band(layout: &BarLayout, row_top: i32) -> (i32, i32) {
     (top, bot)
 }
 
-fn paint_accent_stripe(pixels: &mut [u32], layout: &BarLayout, model: TrayIconKind) {
-    let stripe = rgb_to_dib(accent_color_for(model));
+fn paint_accent_stripe(pixels: &mut [u32], layout: &BarLayout, model: TrayIconKind, is_dark: bool) {
+    let stripe = rgb_to_dib(accent_color_for(model, is_dark));
     for y in 0..layout.canvas_h {
         for x in 0..layout.accent_right {
             if !point_in_rounded_rect(x, y, layout.canvas_w, layout.canvas_h, layout.corner_radius) {
@@ -1153,10 +1153,19 @@ fn paint_accent_stripe(pixels: &mut [u32], layout: &BarLayout, model: TrayIconKi
     }
 }
 
-fn accent_color_for(model: TrayIconKind) -> Color {
+/// Per-provider identity color. Claude = orange. Codex = white-in-dark /
+/// charcoal-in-light — picking a pure white in light mode would vanish into
+/// the `#F3F3F3` background, so we mirror to a contrasting neutral.
+fn accent_color_for(model: TrayIconKind, is_dark: bool) -> Color {
     match model {
         ProviderId::Claude => Color::from_hex("#D97757"),
-        ProviderId::ChatGpt => Color::from_hex("#10A37F"),
+        ProviderId::ChatGpt => {
+            if is_dark {
+                Color::from_hex("#FFFFFF")
+            } else {
+                Color::from_hex("#2A2A2A")
+            }
+        }
     }
 }
 
@@ -1333,44 +1342,62 @@ fn draw_inline_percent(
         return;
     };
     let text = format!("{:.0}%", p);
-    let mut text_w = wide_str(&text);
-    let len_no_nul = text_w.len().saturating_sub(1);
 
-    // Pick the color: when the fill covers the right edge of the bar, the
-    // percent sits on the fill — contrast against the fill's color. Otherwise
-    // it sits on the track — contrast against the track.
+    // Measure the percent against the currently-selected font so we can
+    // anchor it to the fill's trailing edge rather than the bar's far right.
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut sz = windows::Win32::Foundation::SIZE::default();
+    unsafe {
+        let _ = GetTextExtentPoint32W(hdc, &mut wide, &mut sz);
+    }
+    let text_w = sz.cx;
+
     let bar_w = layout.bar_right - layout.bar_left;
     let fill_w = ((p.clamp(0.0, 100.0) / 100.0) * bar_w as f64).round() as i32;
+    let inset = (layout.bar_h / 4).max(2);
     let fill_color = ring_color_for_percent(p);
     let track_color = if is_dark {
         Color::from_hex("#3A3A3A")
     } else {
         Color::from_hex("#D6D6D6")
     };
-    // The percent sits at the right edge of the bar with a small inset; if
-    // fill_w covers most of the bar it lies on the fill, else on the track.
-    let on_fill = fill_w > bar_w * 2 / 3;
-    let underlying = if on_fill { fill_color } else { track_color };
+
+    // Two anchoring modes:
+    //  - Fill is wide enough to hold the percent → right-align the text
+    //    *inside* the fill at its trailing edge. The text sits on the fill.
+    //  - Fill is too narrow → left-align the text just to the right of the
+    //    fill, on the track. The text follows the fill's edge.
+    // Either way the percent is tethered to where the bar reaches.
+    let (text_left, underlying) = if fill_w >= text_w + inset * 2 {
+        let right = layout.bar_left + fill_w - inset;
+        ((right - text_w).max(layout.bar_left + inset), fill_color)
+    } else {
+        let left = layout.bar_left + fill_w + inset;
+        let clamped = left.min(layout.bar_right - text_w - inset).max(layout.bar_left + inset);
+        (clamped, track_color)
+    };
+
     let fg = if use_dark_text_over(underlying) {
         Color::from_hex("#101010")
     } else {
         Color::from_hex("#F5F5F5")
     };
 
-    let inset = (layout.bar_h / 3).max(3);
+    let mut text_buf = wide_str(&text);
+    let len_no_nul = text_buf.len().saturating_sub(1);
     let mut rect = RECT {
-        left: layout.bar_left,
+        left: text_left,
         top: row_top - 2,
-        right: layout.bar_right - inset,
+        right: (text_left + text_w).min(layout.bar_right),
         bottom: row_top + layout.bar_h + 2,
     };
     unsafe {
         SetTextColor(hdc, COLORREF(fg.into_colorref()));
         let _ = DrawTextW(
             hdc,
-            &mut text_w[..len_no_nul],
+            &mut text_buf[..len_no_nul],
             &mut rect,
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
         );
     }
 }
