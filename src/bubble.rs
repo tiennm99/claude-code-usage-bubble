@@ -309,6 +309,14 @@ pub fn set_user_visible(hwnd: HWND, visible: bool) {
         let cmd = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
         let _ = ShowWindow(hwnd, cmd);
     }
+    // A layered window's composited surface is dropped while hidden, so
+    // ShowWindow(SW_SHOWNOACTIVATE) on its own renders blank until the next
+    // UpdateLayeredWindow. The cached BubbleState (pcts + texts) hasn't gone
+    // anywhere, so just re-paint from it so the bubble pops back with the
+    // last good data instead of empty placeholders.
+    if visible {
+        render(hwnd);
+    }
 }
 
 pub fn position(hwnd: HWND) -> Option<(i32, i32)> {
@@ -866,6 +874,9 @@ fn check_fullscreen(bubble_hwnd: HWND) {
             unsafe {
                 let _ = ShowWindow(bubble_hwnd, SW_SHOWNOACTIVATE);
             }
+            // Re-paint so the layered surface has the cached data again
+            // (see comment in `set_user_visible`).
+            render(bubble_hwnd);
         }
         if let Some(b) = lock_bubbles().get_mut(&(bubble_hwnd.0 as isize)) {
             b.hidden_by_fullscreen = false;
