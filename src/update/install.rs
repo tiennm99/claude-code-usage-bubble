@@ -58,8 +58,14 @@ fn spawn_handoff(source: &std::path::Path, target: &std::path::Path) -> Result<(
     let cmd = format!(
         r#"timeout /t 2 /nobreak >nul & move /y "{src_str}" "{tgt_str}" & start "" "{tgt_str}""#
     );
+    // raw_arg bypasses Rust's std auto-escaping which would turn the inner
+    // `"` characters into `\"`. cmd.exe does not recognise `\"`, so the
+    // escaped form makes `start` see the path as `\\` and emit a
+    // "Windows cannot find '\\'" dialog. Feeding the command line raw
+    // preserves the quotes cmd.exe actually expects.
     Command::new("cmd.exe")
-        .args(["/c", &cmd])
+        .raw_arg("/c")
+        .raw_arg(format!("\"{cmd}\""))
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
