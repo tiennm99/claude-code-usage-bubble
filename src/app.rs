@@ -502,8 +502,15 @@ fn propagate_to_ui() {
         let entry = snap.snapshots.get(&id);
         let session_pct = entry.map(|s| s.windows.primary.utilization);
         let weekly_pct = entry.map(|s| s.windows.secondary.utilization);
-        let session_text = entry.map(|s| s.primary_text.clone()).unwrap_or_default();
-        let weekly_text = entry.map(|s| s.secondary_text.clone()).unwrap_or_default();
+        // The bubble paints the percent inline inside the bar fill, so it
+        // only needs the countdown string on the right. The panel still
+        // shows the combined "X% · Yh" string via `primary_text`.
+        let session_text = entry
+            .map(|s| i18n::format_countdown(s.windows.primary.resets_at, &snap.i18n_strings))
+            .unwrap_or_default();
+        let weekly_text = entry
+            .map(|s| i18n::format_countdown(s.windows.secondary.resets_at, &snap.i18n_strings))
+            .unwrap_or_default();
         bubble::update_data(
             hwnd.to_hwnd(),
             session_pct,

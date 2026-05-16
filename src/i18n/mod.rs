@@ -198,7 +198,9 @@ pub fn format_window(window: &crate::usage::Window, strings: &LocaleStrings) -> 
     }
 }
 
-fn format_countdown(resets_at: Option<SystemTime>, strings: &LocaleStrings) -> String {
+/// Countdown only — used by the bubble, which renders the percent inside the
+/// bar fill and only needs the time-to-reset on the right.
+pub fn format_countdown(resets_at: Option<SystemTime>, strings: &LocaleStrings) -> String {
     let Some(reset) = resets_at else {
         return String::new();
     };

@@ -276,6 +276,23 @@ fn paint(hwnd: HWND, hdc: HDC) {
         FillRect(hdc, &rc, bg_brush);
         let _ = DeleteObject(bg_brush);
 
+        // 4-px accent stripe matching the bubble — same provider color so the
+        // identity carries across both surfaces.
+        let stripe_color = match data.model {
+            ProviderId::Claude => Color::from_hex("#D97757"),
+            ProviderId::ChatGpt => Color::from_hex("#10A37F"),
+        };
+        let stripe_w = scaled(4);
+        let stripe_rect = RECT {
+            left: 0,
+            top: 0,
+            right: stripe_w,
+            bottom: rc.bottom,
+        };
+        let stripe_brush = CreateSolidBrush(COLORREF(stripe_color.into_colorref()));
+        FillRect(hdc, &stripe_rect, stripe_brush);
+        let _ = DeleteObject(stripe_brush);
+
         // Header row: model label
         let header = match data.model {
             ProviderId::Claude => data.strings.claude_label.clone(),
