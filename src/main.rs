@@ -1,4 +1,8 @@
 #![windows_subsystem = "windows"]
+// Several modules (creds, usage, update, os::dpi, …) expose API that the
+// app surface doesn't fully call yet — they're scaffolding for in-progress
+// port phases. Allow at the crate root rather than scattering attributes.
+#![allow(dead_code)]
 
 // Original infrastructure.
 mod creds;

@@ -41,6 +41,11 @@ struct PanelState {
     data: PanelData,
 }
 
+// HWND wraps `*mut c_void` which is `!Send`, but the panel state is only ever
+// accessed from the UI thread — the Mutex exists to satisfy the `OnceLock`
+// static contract, not because of real cross-thread sharing.
+unsafe impl Send for PanelState {}
+
 fn state() -> &'static Mutex<Option<PanelState>> {
     static S: OnceLock<Mutex<Option<PanelState>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(None))
@@ -267,7 +272,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
     let accent = bar_color_for(data.session_pct.max(data.weekly_pct), data.is_dark);
 
     unsafe {
-        let bg_brush = CreateSolidBrush(COLORREF(bg.to_colorref()));
+        let bg_brush = CreateSolidBrush(COLORREF(bg.into_colorref()));
         FillRect(hdc, &rc, bg_brush);
         let _ = DeleteObject(bg_brush);
 
@@ -362,7 +367,7 @@ fn draw_row(
     );
 
     unsafe {
-        let track_brush = CreateSolidBrush(COLORREF(track.to_colorref()));
+        let track_brush = CreateSolidBrush(COLORREF(track.into_colorref()));
         let bar_rect = RECT {
             left: bar_x,
             top: row_y,
@@ -374,7 +379,7 @@ fn draw_row(
 
         let fill_w = ((pct.clamp(0.0, 100.0) / 100.0) * bar_w as f64).round() as i32;
         if fill_w > 0 {
-            let accent_brush = CreateSolidBrush(COLORREF(accent.to_colorref()));
+            let accent_brush = CreateSolidBrush(COLORREF(accent.into_colorref()));
             let fill_rect = RECT {
                 left: bar_x,
                 top: row_y,
@@ -439,7 +444,7 @@ fn draw_text(
             PCWSTR::from_raw(font_name.as_ptr()),
         );
         let old_font = SelectObject(hdc, font);
-        SetTextColor(hdc, COLORREF(color.to_colorref()));
+        SetTextColor(hdc, COLORREF(color.into_colorref()));
         SetBkMode(hdc, TRANSPARENT);
         let mut rect = RECT {
             left: x,

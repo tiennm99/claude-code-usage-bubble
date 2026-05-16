@@ -1,10 +1,15 @@
-// Floating circular bubble window.
+// Floating rounded-rectangle bubble window.
 //
 // Top-level window with WS_POPUP + WS_EX_LAYERED + WS_EX_TOPMOST + WS_EX_NOACTIVATE.
-// Shape is achieved via per-pixel alpha (alpha=0 outside the circle) and confirmed
-// via WM_NCHITTEST returning HTCAPTION inside the circle, HTTRANSPARENT outside.
-// The OS handles drag automatically because HTCAPTION inside the circle puts the
-// click into the system move loop.
+// Shape is achieved via per-pixel alpha (alpha=0 outside the rounded rect) and
+// confirmed via WM_NCHITTEST returning HTCAPTION inside the rect, HTTRANSPARENT
+// outside. The OS handles drag automatically because HTCAPTION inside the
+// rect puts the click into the system move loop.
+//
+// Layout: two horizontal bars stacked vertically — top = session (5h), bottom =
+// weekly (7d) — each followed by right-aligned "X% · Yh Zm" text. The aspect
+// ratio is fixed at BUBBLE_ASPECT (3:1) so `size_logical` is interpreted as
+// width and the height is derived.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -13,7 +18,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -26,10 +31,12 @@ type TrayIconKind = ProviderId;
 
 // ---------- Public types & API ----------
 
-pub const MIN_BUBBLE_SIZE: i32 = 32;
-pub const MAX_BUBBLE_SIZE: i32 = 128;
-pub const DEFAULT_BUBBLE_SIZE: i32 = 56;
-const RESIZE_STEP: i32 = 8;
+// Width clamps in logical pixels (height = width / BUBBLE_ASPECT).
+pub const MIN_BUBBLE_SIZE: i32 = 120;
+pub const MAX_BUBBLE_SIZE: i32 = 360;
+pub const DEFAULT_BUBBLE_SIZE: i32 = 180;
+const RESIZE_STEP: i32 = 20;
+const BUBBLE_ASPECT: i32 = 3; // width : height = 3 : 1
 const SNAP_ZONE_LOGICAL: i32 = 12;
 const CLASS_NAME: &str = "ClaudeCodeUsageBubble";
 const FULLSCREEN_POLL_MS: u32 = 1500;
@@ -38,8 +45,15 @@ pub struct BubbleConfig {
     pub model: TrayIconKind,
     pub size_logical: i32,
     pub position: Option<(i32, i32)>,
-    pub percent: Option<f64>,
+    pub session_pct: Option<f64>,
+    pub session_text: String,
+    pub weekly_pct: Option<f64>,
+    pub weekly_text: String,
     pub is_dark: bool,
+}
+
+fn bubble_height_logical(width_logical: i32) -> i32 {
+    (width_logical / BUBBLE_ASPECT).max(20)
 }
 
 /// Register the bubble window class. Idempotent; safe to call before the first
@@ -77,11 +91,11 @@ pub fn create(config: BubbleConfig) -> HWND {
         let title_w = wide_str("Claude Code Usage Bubble");
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
         let dpi = primary_dpi();
-        let size_px = scale_to_dpi(initial_size_logical, dpi);
-        let (x, y) =
-            config
-                .position
-                .unwrap_or_else(|| default_position(size_px, config.model));
+        let width_px = scale_to_dpi(initial_size_logical, dpi);
+        let height_px = scale_to_dpi(bubble_height_logical(initial_size_logical), dpi);
+        let (x, y) = config
+            .position
+            .unwrap_or_else(|| default_position(width_px, height_px, config.model));
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             PCWSTR::from_raw(class_w.as_ptr()),
@@ -89,8 +103,8 @@ pub fn create(config: BubbleConfig) -> HWND {
             WS_POPUP,
             x,
             y,
-            size_px,
-            size_px,
+            width_px,
+            height_px,
             HWND::default(),
             HMENU::default(),
             hinstance,
@@ -143,7 +157,10 @@ pub fn create(config: BubbleConfig) -> HWND {
             model: config.model,
             size_logical: initial_size_logical,
             dpi,
-            percent: config.percent,
+            session_pct: config.session_pct,
+            session_text: config.session_text,
+            weekly_pct: config.weekly_pct,
+            weekly_text: config.weekly_text,
             is_dark: config.is_dark,
             drag_start_pos: None,
             hidden_by_fullscreen: false,
@@ -168,13 +185,22 @@ pub fn destroy(hwnd: HWND) {
     }
 }
 
-pub fn update_percentage(hwnd: HWND, percent: Option<f64>) {
+pub fn update_data(
+    hwnd: HWND,
+    session_pct: Option<f64>,
+    session_text: String,
+    weekly_pct: Option<f64>,
+    weekly_text: String,
+) {
     {
         let mut bubbles = lock_bubbles();
         let Some(b) = bubbles.get_mut(&(hwnd.0 as isize)) else {
             return;
         };
-        b.percent = percent;
+        b.session_pct = session_pct;
+        b.session_text = session_text;
+        b.weekly_pct = weekly_pct;
+        b.weekly_text = weekly_text;
     }
     render(hwnd);
 }
@@ -232,7 +258,10 @@ struct BubbleState {
     model: TrayIconKind,
     size_logical: i32,
     dpi: u32,
-    percent: Option<f64>,
+    session_pct: Option<f64>,
+    session_text: String,
+    weekly_pct: Option<f64>,
+    weekly_text: String,
     is_dark: bool,
     drag_start_pos: Option<(i32, i32)>,
     hidden_by_fullscreen: bool,
@@ -363,16 +392,39 @@ fn hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
             return LRESULT(HTNOWHERE as isize);
         }
     }
-    let cx = (r.left + r.right) / 2;
-    let cy = (r.top + r.bottom) / 2;
-    let radius = ((r.right - r.left) / 2).max(1);
-    let dx = pt.x - cx;
-    let dy = pt.y - cy;
-    if dx * dx + dy * dy <= radius * radius {
+    let w = r.right - r.left;
+    let h = r.bottom - r.top;
+    let radius = corner_radius_px(h);
+    // Local coordinates relative to top-left of the bubble.
+    let lx = pt.x - r.left;
+    let ly = pt.y - r.top;
+    if point_in_rounded_rect(lx, ly, w, h, radius) {
         LRESULT(HTCAPTION as isize)
     } else {
         LRESULT(HTTRANSPARENT as isize)
     }
+}
+
+fn corner_radius_px(height_px: i32) -> i32 {
+    (height_px / 3).max(4)
+}
+
+fn point_in_rounded_rect(x: i32, y: i32, w: i32, h: i32, r: i32) -> bool {
+    if x < 0 || y < 0 || x >= w || y >= h {
+        return false;
+    }
+    // The straight horizontal and vertical strips are always inside; only the
+    // four corner squares need the circular falloff check.
+    let in_x_strip = x >= r && x < w - r;
+    let in_y_strip = y >= r && y < h - r;
+    if in_x_strip || in_y_strip {
+        return true;
+    }
+    let cx = if x < r { r } else { w - 1 - r };
+    let cy = if y < r { r } else { h - 1 - r };
+    let dx = x - cx;
+    let dy = y - cy;
+    dx * dx + dy * dy <= r * r
 }
 
 fn lparam_to_point(lparam: LPARAM) -> POINT {
@@ -396,22 +448,23 @@ fn resize_step(hwnd: HWND, delta: i32) {
         b.size_logical = new_logical;
         (new_logical, b.dpi)
     };
-    let size_px = scale_to_dpi(new_logical, dpi);
+    let width_px = scale_to_dpi(new_logical, dpi);
+    let height_px = scale_to_dpi(bubble_height_logical(new_logical), dpi);
     let mut r = RECT::default();
     unsafe {
         let _ = GetWindowRect(hwnd, &mut r);
         // Resize centered on existing center.
         let cx = (r.left + r.right) / 2;
         let cy = (r.top + r.bottom) / 2;
-        let new_x = cx - size_px / 2;
-        let new_y = cy - size_px / 2;
+        let new_x = cx - width_px / 2;
+        let new_y = cy - height_px / 2;
         let _ = SetWindowPos(
             hwnd,
             HWND::default(),
             new_x,
             new_y,
-            size_px,
-            size_px,
+            width_px,
+            height_px,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
@@ -541,15 +594,72 @@ fn check_fullscreen(bubble_hwnd: HWND) {
 
 // ---------- Painting ----------
 
+struct BarLayout {
+    bar_left: i32,
+    bar_right: i32,
+    bar_h: i32,
+    right_text_left: i32,
+    right_text_w: i32,
+    row1_y: i32,
+    row2_y: i32,
+}
+
+fn compute_layout(width_px: i32, height_px: i32) -> BarLayout {
+    let pad_x = (height_px / 6).max(3);
+    // Bar height is capped — the previous formula filled all the vertical space
+    // and produced a too-tall font that overflowed the right-text column. Cap
+    // at ~1/4 of the bubble height so the rows have visible padding around them.
+    let bar_h = (height_px / 4).clamp(6, 18);
+    let row_gap = (bar_h / 2).max(3);
+    let pad_y = ((height_px - bar_h * 2 - row_gap) / 2).max(2);
+    // Right-side text needs ~6× the bar height to fit "100% · 23h" comfortably
+    // at the font size derived below (bar_h * 0.75). Floor in px for the
+    // smallest legible width.
+    let right_text_w = (bar_h * 6).max(56);
+    let bar_left = pad_x;
+    let bar_right = (width_px - pad_x - right_text_w - bar_h / 2).max(bar_left + 8);
+    let right_text_left = bar_right + (bar_h / 2).max(2);
+    let row1_y = pad_y;
+    let row2_y = pad_y + bar_h + row_gap;
+    BarLayout {
+        bar_left,
+        bar_right,
+        bar_h,
+        right_text_left,
+        right_text_w,
+        row1_y,
+        row2_y,
+    }
+}
+
+/// Pack an `Rgb` for direct write into a 32-bpp `BI_RGB` DIB. The DIB stores
+/// bytes B,G,R,X in memory, so a little-endian u32 read is `(b) | (g<<8) | (r<<16)`.
+/// Note this is the OPPOSITE byte order from a GDI `COLORREF` (which is
+/// `(r) | (g<<8) | (b<<16)`) — don't confuse the two.
+fn rgb_to_dib(c: Color) -> u32 {
+    (c.b as u32) | ((c.g as u32) << 8) | ((c.r as u32) << 16)
+}
+
 fn render(hwnd: HWND) {
-    let (size_logical, dpi, percent, is_dark) = {
+    let (size_logical, dpi, session_pct, session_text, weekly_pct, weekly_text, is_dark) = {
         let bubbles = lock_bubbles();
         let Some(b) = bubbles.get(&(hwnd.0 as isize)) else {
             return;
         };
-        (b.size_logical, b.dpi, b.percent, b.is_dark)
+        (
+            b.size_logical,
+            b.dpi,
+            b.session_pct,
+            b.session_text.clone(),
+            b.weekly_pct,
+            b.weekly_text.clone(),
+            b.is_dark,
+        )
     };
-    let size_px = scale_to_dpi(size_logical, dpi);
+    let width_px = scale_to_dpi(size_logical, dpi);
+    let height_px = scale_to_dpi(bubble_height_logical(size_logical), dpi);
+    let radius = corner_radius_px(height_px);
+    let layout = compute_layout(width_px, height_px);
 
     unsafe {
         let screen_dc = GetDC(hwnd);
@@ -557,8 +667,8 @@ fn render(hwnd: HWND) {
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: size_px,
-                biHeight: -size_px,
+                biWidth: width_px,
+                biHeight: -height_px,
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: 0,
@@ -576,30 +686,25 @@ fn render(hwnd: HWND) {
         }
         let old_bmp = SelectObject(mem_dc, dib);
 
-        let pixel_count = (size_px * size_px) as usize;
+        let pixel_count = (width_px * height_px) as usize;
         let pixels = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
 
-        paint_background(pixels, size_px, is_dark);
-        paint_ring(pixels, size_px, percent.unwrap_or(0.0), is_dark);
-        paint_text(mem_dc, size_px, percent, is_dark, dpi);
+        // Everything outside the rounded rect stays 0 (fully transparent).
+        pixels.fill(0);
 
-        // Final alpha pass: set alpha=255 inside circle, 0 outside.
-        let cx = (size_px - 1) as f64 / 2.0;
-        let cy = cx;
-        let radius = (size_px / 2) as f64 - 1.0;
-        let r_sq = radius * radius;
-        for y in 0..size_px {
-            for x in 0..size_px {
-                let dx = x as f64 - cx;
-                let dy = y as f64 - cy;
-                let idx = (y * size_px + x) as usize;
-                if dx * dx + dy * dy <= r_sq {
-                    pixels[idx] |= 0xFF000000;
-                } else {
-                    pixels[idx] = 0;
-                }
-            }
-        }
+        paint_background(pixels, width_px, height_px, radius, is_dark);
+        paint_bars(pixels, width_px, &layout, session_pct, weekly_pct, is_dark);
+        paint_bar_texts(
+            mem_dc,
+            &layout,
+            &session_text,
+            &weekly_text,
+            is_dark,
+        );
+
+        // Final alpha pass: alpha=255 inside the rounded rect, 0 outside. This
+        // also lifts GDI-drawn text (which leaves alpha=0) into the visible plane.
+        apply_alpha_mask(pixels, width_px, height_px, radius);
 
         let mut wr = RECT::default();
         let _ = GetWindowRect(hwnd, &mut wr);
@@ -609,8 +714,8 @@ fn render(hwnd: HWND) {
         };
         let pt_src = POINT { x: 0, y: 0 };
         let sz = SIZE {
-            cx: size_px,
-            cy: size_px,
+            cx: width_px,
+            cy: height_px,
         };
         let blend = BLENDFUNCTION {
             BlendOp: 0,
@@ -637,84 +742,96 @@ fn render(hwnd: HWND) {
     }
 }
 
-fn paint_background(pixels: &mut [u32], size_px: i32, is_dark: bool) {
+fn paint_background(pixels: &mut [u32], w: i32, h: i32, radius: i32, is_dark: bool) {
     let bg = if is_dark {
         Color::from_hex("#1F1F1F")
     } else {
         Color::from_hex("#F3F3F3")
     };
-    let bg_bgr = bg.to_colorref();
-    let cx = (size_px - 1) as f64 / 2.0;
-    let cy = cx;
-    let radius = (size_px / 2) as f64 - 1.0;
-    let r_sq = radius * radius;
-    for y in 0..size_px {
-        for x in 0..size_px {
-            let dx = x as f64 - cx;
-            let dy = y as f64 - cy;
-            let idx = (y * size_px + x) as usize;
-            if dx * dx + dy * dy <= r_sq {
-                pixels[idx] = bg_bgr;
-            } else {
-                pixels[idx] = 0;
+    let bg_packed = rgb_to_dib(bg);
+    for y in 0..h {
+        for x in 0..w {
+            if point_in_rounded_rect(x, y, w, h, radius) {
+                pixels[(y * w + x) as usize] = bg_packed;
             }
         }
     }
 }
 
-fn paint_ring(pixels: &mut [u32], size_px: i32, percent: f64, is_dark: bool) {
-    let ring = ring_color_for_percent(percent).to_colorref();
+fn paint_bars(
+    pixels: &mut [u32],
+    width_px: i32,
+    layout: &BarLayout,
+    session_pct: Option<f64>,
+    weekly_pct: Option<f64>,
+    is_dark: bool,
+) {
     let track = if is_dark {
-        Color::from_hex("#3A3A3A").to_colorref()
+        rgb_to_dib(Color::from_hex("#3A3A3A"))
     } else {
-        Color::from_hex("#D6D6D6").to_colorref()
+        rgb_to_dib(Color::from_hex("#D6D6D6"))
     };
-    let cx = (size_px - 1) as f64 / 2.0;
-    let cy = cx;
-    let outer = (size_px / 2) as f64 - 1.0;
-    let thickness = ((size_px as f64) * 0.12).max(3.0);
-    let inner = outer - thickness;
-    let inner_sq = inner * inner;
-    let outer_sq = outer * outer;
-    let sweep = (percent.clamp(0.0, 100.0) / 100.0) * 2.0 * std::f64::consts::PI;
-    for y in 0..size_px {
-        for x in 0..size_px {
-            let dx = x as f64 - cx;
-            let dy = y as f64 - cy;
-            let d_sq = dx * dx + dy * dy;
-            if d_sq <= outer_sq && d_sq >= inner_sq {
-                // Angle from 12 o'clock, clockwise.
-                let mut a = dx.atan2(-dy);
-                if a < 0.0 {
-                    a += 2.0 * std::f64::consts::PI;
-                }
-                let idx = (y * size_px + x) as usize;
-                pixels[idx] = if a <= sweep { ring } else { track };
-            }
+    paint_bar(pixels, width_px, layout, layout.row1_y, session_pct, track);
+    paint_bar(pixels, width_px, layout, layout.row2_y, weekly_pct, track);
+}
+
+fn paint_bar(
+    pixels: &mut [u32],
+    width_px: i32,
+    layout: &BarLayout,
+    top: i32,
+    pct: Option<f64>,
+    track: u32,
+) {
+    let bar_w = layout.bar_right - layout.bar_left;
+    if bar_w <= 0 {
+        return;
+    }
+    // Track first.
+    for y in top..top + layout.bar_h {
+        for x in layout.bar_left..layout.bar_right {
+            pixels[(y * width_px + x) as usize] = track;
+        }
+    }
+    let Some(p) = pct else {
+        return;
+    };
+    let fill_w = ((p.clamp(0.0, 100.0) / 100.0) * bar_w as f64).round() as i32;
+    if fill_w <= 0 {
+        return;
+    }
+    let accent = rgb_to_dib(ring_color_for_percent(p));
+    let end_x = (layout.bar_left + fill_w).min(layout.bar_right);
+    for y in top..top + layout.bar_h {
+        for x in layout.bar_left..end_x {
+            pixels[(y * width_px + x) as usize] = accent;
         }
     }
 }
 
-fn paint_text(hdc: HDC, size_px: i32, percent: Option<f64>, is_dark: bool, _dpi: u32) {
-    let text = match percent {
-        Some(p) => format!("{:.0}%", p),
-        None => "—".to_string(),
-    };
-    let mut text_w = wide_str(&text);
+fn paint_bar_texts(
+    hdc: HDC,
+    layout: &BarLayout,
+    session_text: &str,
+    weekly_text: &str,
+    is_dark: bool,
+) {
     let text_color = if is_dark {
-        Color::from_hex("#F5F5F5")
+        Color::from_hex("#EAEAEA")
     } else {
         Color::from_hex("#1F1F1F")
     };
-    let font_height = -(size_px / 4).max(8);
+    // Match font height to ~75% of the bar height — leaves room above/below
+    // for descenders and keeps "100% · 23h" within `right_text_w`.
+    let font_size = (layout.bar_h as f64 * 0.75).round() as i32;
     let font_name = wide_str("Segoe UI");
     unsafe {
         let font = CreateFontW(
-            font_height,
+            -font_size.max(8),
             0,
             0,
             0,
-            FW_SEMIBOLD.0 as i32,
+            FW_NORMAL.0 as i32,
             0,
             0,
             0,
@@ -726,24 +843,50 @@ fn paint_text(hdc: HDC, size_px: i32, percent: Option<f64>, is_dark: bool, _dpi:
             PCWSTR::from_raw(font_name.as_ptr()),
         );
         let old_font = SelectObject(hdc, font);
-        SetTextColor(hdc, COLORREF(text_color.to_colorref()));
+        SetTextColor(hdc, COLORREF(text_color.into_colorref()));
         SetBkMode(hdc, TRANSPARENT);
-        let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: size_px,
-            bottom: size_px,
-        };
-        // Trim the trailing NUL — DrawTextW reads slice length as count.
-        let len_no_nul = text_w.len().saturating_sub(1);
+
+        draw_right_text(hdc, layout, layout.row1_y, session_text);
+        draw_right_text(hdc, layout, layout.row2_y, weekly_text);
+
+        SelectObject(hdc, old_font);
+        let _ = DeleteObject(font);
+    }
+}
+
+fn draw_right_text(hdc: HDC, layout: &BarLayout, row_top: i32, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let mut text_w = wide_str(text);
+    let len_no_nul = text_w.len().saturating_sub(1);
+    // Vertically center within the bar row.
+    let mut rect = RECT {
+        left: layout.right_text_left,
+        top: row_top - 2,
+        right: layout.right_text_left + layout.right_text_w,
+        bottom: row_top + layout.bar_h + 2,
+    };
+    unsafe {
         let _ = DrawTextW(
             hdc,
             &mut text_w[..len_no_nul],
             &mut rect,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP | DT_END_ELLIPSIS,
         );
-        SelectObject(hdc, old_font);
-        let _ = DeleteObject(font);
+    }
+}
+
+fn apply_alpha_mask(pixels: &mut [u32], w: i32, h: i32, radius: i32) {
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) as usize;
+            if point_in_rounded_rect(x, y, w, h, radius) {
+                pixels[idx] |= 0xFF00_0000;
+            } else {
+                pixels[idx] = 0;
+            }
+        }
     }
 }
 
@@ -788,7 +931,7 @@ fn scale_to_dpi(logical: i32, dpi: u32) -> i32 {
     ((logical as i64) * (dpi as i64) / 96) as i32
 }
 
-fn default_position(size_px: i32, model: TrayIconKind) -> (i32, i32) {
+fn default_position(width_px: i32, height_px: i32, model: TrayIconKind) -> (i32, i32) {
     // Bottom-right of primary work area, with a 24-pixel gap from the edges.
     // Stagger the Codex bubble above the Claude one if both are enabled.
     unsafe {
@@ -810,10 +953,10 @@ fn default_position(size_px: i32, model: TrayIconKind) -> (i32, i32) {
         let gap = 24;
         let stagger = match model {
             ProviderId::Claude => 0,
-            ProviderId::ChatGpt => size_px + gap,
+            ProviderId::ChatGpt => height_px + gap,
         };
-        let x = wa.right - size_px - gap;
-        let y = wa.bottom - size_px - gap - stagger;
+        let x = wa.right - width_px - gap;
+        let y = wa.bottom - height_px - gap - stagger;
         (x, y)
     }
 }

@@ -12,7 +12,7 @@ pub mod registry;
 pub mod types;
 
 pub use registry::Registry;
-pub use types::{ProviderId, ProviderSnapshot, UsageWindows, Window};
+pub use types::{ProviderId, UsageWindows, Window};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -24,6 +24,8 @@ pub enum Error {
     TokenExpired,
     #[error("network: {0}")]
     Network(#[from] crate::net::Error),
+    #[error("credentials: {0}")]
+    Creds(#[from] crate::creds::Error),
     #[error("unexpected response shape: {0}")]
     BadResponse(String),
 }

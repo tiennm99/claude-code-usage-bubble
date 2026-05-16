@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use crate::creds::{CredentialSource, Locator};
+use crate::creds::Locator;
 use crate::net::Client;
 use crate::usage::{Error, ProviderId, UsageProvider, UsageWindows, Window};
 
@@ -67,16 +67,16 @@ impl UsageProvider for ChatGptProvider {
 }
 
 fn envelope_to_windows(envelope: Envelope) -> Option<UsageWindows> {
-    let rl = envelope.rate_limit.flatten()?;
+    let rl = envelope.rate_limit.flatten_box()?;
     Some(UsageWindows {
         primary: rl
             .primary_window
-            .flatten()
+            .flatten_box()
             .map(window_from)
             .unwrap_or_default(),
         secondary: rl
             .secondary_window
-            .flatten()
+            .flatten_box()
             .map(window_from)
             .unwrap_or_default(),
     })
@@ -114,12 +114,14 @@ struct ApiWindow {
     reset_at: i64,
 }
 
-// Helpers used to make `Option<Option<Box<…>>>` flatten cleanly.
+// Helpers used to make `Option<Option<Box<…>>>` flatten cleanly. We can't
+// reuse the std `Option::flatten` name — the inherent method (which returns
+// `Option<Box<T>>`) would shadow this trait method.
 trait FlattenBoxed<T> {
-    fn flatten(self) -> Option<T>;
+    fn flatten_box(self) -> Option<T>;
 }
 impl<T> FlattenBoxed<T> for Option<Option<Box<T>>> {
-    fn flatten(self) -> Option<T> {
+    fn flatten_box(self) -> Option<T> {
         self.and_then(|inner| inner.map(|b| *b))
     }
 }

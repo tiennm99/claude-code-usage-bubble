@@ -23,8 +23,8 @@ pub enum Error {
 }
 
 pub use channel::{current as current_channel, Channel};
-pub use install::{begin, run_cli};
-pub use release::{fetch_latest, Release, Version};
+pub use install::run_cli;
+pub use release::Release;
 
 /// Result of a release-check call.
 #[derive(Debug)]

@@ -16,6 +16,12 @@ impl Rgb {
         Self { r, g, b }
     }
 
+    /// Parse `#RRGGBB` or `RRGGBB`. Panics on malformed input — meant for
+    /// hardcoded design-system literals at compile-known call sites.
+    pub fn from_hex(hex: &str) -> Self {
+        Self::parse_hex(hex).unwrap_or_else(|| panic!("invalid hex color literal: {hex:?}"))
+    }
+
     /// Parse `#RRGGBB` or `RRGGBB`. Returns `None` on malformed input.
     pub fn parse_hex(hex: &str) -> Option<Self> {
         let s = hex.trim_start_matches('#');

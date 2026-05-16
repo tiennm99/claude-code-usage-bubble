@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
-use crate::creds::{CredentialSource, Locator};
+use crate::creds::Locator;
 use crate::net::Client;
 use crate::usage::{headers, Error, ProviderId, UsageProvider, UsageWindows, Window};
 

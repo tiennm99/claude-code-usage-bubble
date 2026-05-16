@@ -249,11 +249,18 @@ fn create_initial_bubbles() {
 }
 
 fn spawn_bubble(kind: TrayIconKind, settings: &Settings, is_dark: bool) {
+    // "…" matches the in-flight/transient-error placeholder used by
+    // `apply_results`, so the bubble has visible feedback during the first
+    // poll rather than rendering with two empty grey tracks.
+    let placeholder = "…".to_string();
     let hwnd = bubble::create(bubble::BubbleConfig {
         model: kind,
         size_logical: settings.bubble_size_logical,
         position: settings.bubble_positions.get(kind),
-        percent: None,
+        session_pct: None,
+        session_text: placeholder.clone(),
+        weekly_pct: None,
+        weekly_text: placeholder,
         is_dark,
     });
     if hwnd != HWND::default() {
@@ -492,11 +499,18 @@ fn propagate_to_ui() {
 
     for (kind, hwnd) in snap.bubbles.iter() {
         let id = kind_to_provider(*kind);
-        let pct = snap
-            .snapshots
-            .get(&id)
-            .map(|s| s.windows.primary.utilization);
-        bubble::update_percentage(hwnd.to_hwnd(), pct);
+        let entry = snap.snapshots.get(&id);
+        let session_pct = entry.map(|s| s.windows.primary.utilization);
+        let weekly_pct = entry.map(|s| s.windows.secondary.utilization);
+        let session_text = entry.map(|s| s.primary_text.clone()).unwrap_or_default();
+        let weekly_text = entry.map(|s| s.secondary_text.clone()).unwrap_or_default();
+        bubble::update_data(
+            hwnd.to_hwnd(),
+            session_pct,
+            session_text,
+            weekly_pct,
+            weekly_text,
+        );
     }
     refresh_tray_icons_with(&snap);
 
