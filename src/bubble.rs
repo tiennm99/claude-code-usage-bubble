@@ -877,11 +877,12 @@ fn check_fullscreen(bubble_hwnd: HWND) {
 
 const ACCENT_STRIPE_W_LOGICAL: i32 = 4;
 const LABEL_PAD_LOGICAL: i32 = 6;
-// Worst-case width-probe for the right-side countdown column. The bubble
-// renders countdown-only (percent moved inline), so this is just "N{suffix}"
-// for the longest reasonable duration. Bumped from "100% · 23h" which had
-// been sized for the old combined string and left a big empty gap.
 const COUNTDOWN_TEMPLATE: &str = "999d";
+// Percent now lives in its own column between the bar and the countdown so
+// the two numeric readouts ("44%" and "3h") sit next to each other for
+// quick scanning, and the percent never has to fight the bar's fill colour
+// for contrast.
+const PERCENT_TEMPLATE: &str = "100%";
 
 struct BarLayout {
     /// Bubble width in pixels.
@@ -890,11 +891,14 @@ struct BarLayout {
     canvas_h: i32,
     /// Corner radius of the rounded rectangle.
     corner_radius: i32,
-    /// Accent stripe (left edge) in pixels — Claude orange or Codex green.
+    /// Accent stripe (left edge) in pixels — Claude orange or Codex neutral.
     accent_right: i32,
-    /// Label column ("5h" / "7d").
+    /// Row label column ("5h" / "7d").
     label_left: i32,
     label_right: i32,
+    /// Percent column ("44%"), rendered on the bubble background.
+    percent_left: i32,
+    percent_right: i32,
     /// Bar geometry.
     bar_left: i32,
     bar_right: i32,
@@ -905,7 +909,7 @@ struct BarLayout {
     /// Vertical positions (top edge of each row's bar).
     row1_y: i32,
     row2_y: i32,
-    /// Font size for the main text (countdown + inline percent).
+    /// Font size for the main text (percent + countdown).
     font_px: i32,
     /// Font size for the muted row labels — a notch smaller than `font_px`.
     label_font_px: i32,
@@ -928,17 +932,23 @@ fn compute_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BarLayout {
     let font_px = scale_to_dpi(bp.font, dpi).max(scale_to_dpi(11, dpi));
     let label_font_px = scale_to_dpi(bp.font - 2, dpi).max(scale_to_dpi(9, dpi));
     let countdown_w = measure_text_w(mem_dc, COUNTDOWN_TEMPLATE, font_px);
+    let percent_w = measure_text_w(mem_dc, PERCENT_TEMPLATE, font_px);
     let label_w = measure_text_w(mem_dc, "5h", label_font_px)
         .max(measure_text_w(mem_dc, "7d", label_font_px));
 
+    // Layout (left → right):
+    //   [accent] [pad] [label] [pad] [bar] [pad] [percent] [pad] [countdown] [pad_x]
     let accent_left = 0;
     let accent_right = accent_left + accent_w;
     let label_left = accent_right + label_pad;
     let label_right = label_left + label_w;
     let bar_left = label_right + label_pad;
+
     let right_text_right = width_px - pad_x;
     let right_text_left = (right_text_right - countdown_w).max(bar_left + scale_to_dpi(20, dpi));
-    let bar_right = (right_text_left - label_pad).max(bar_left + scale_to_dpi(20, dpi));
+    let percent_right = (right_text_left - label_pad).max(bar_left + scale_to_dpi(20, dpi));
+    let percent_left = (percent_right - percent_w).max(bar_left + scale_to_dpi(20, dpi));
+    let bar_right = (percent_left - label_pad).max(bar_left + scale_to_dpi(20, dpi));
 
     let row1_y = pad_y;
     let row2_y = pad_y + bar_h + row_gap;
@@ -950,6 +960,8 @@ fn compute_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BarLayout {
         accent_right,
         label_left,
         label_right,
+        percent_left,
+        percent_right,
         bar_left,
         bar_right,
         bar_h,
@@ -1250,8 +1262,10 @@ fn blend(a: Color, b: Color, t: f64) -> Color {
     )
 }
 
-/// One pass over the GDI text: row labels (muted) + inline percent (inside
-/// the bar) + countdown (right column).
+/// One pass over the GDI text: row labels (muted) + percent + countdown.
+/// The percent column lives between the bar and the countdown so the
+/// numeric readouts cluster together for quick scanning, and the percent
+/// text always sits on the bubble background — never on the bar fill.
 fn paint_text_layer(hdc: HDC, layout: &BarLayout, inputs: &PaintInputs) {
     let text_color = if inputs.is_dark {
         Color::from_hex("#EAEAEA")
@@ -1277,11 +1291,11 @@ fn paint_text_layer(hdc: HDC, layout: &BarLayout, inputs: &PaintInputs) {
         draw_label(hdc, layout, layout.row1_y, "5h");
         draw_label(hdc, layout, layout.row2_y, "7d");
 
-        // Inline percent: drawn over the bar, contrast picked from the pixel
-        // under the text (fill if covered, track otherwise).
+        // Percent in its own column (between bar and countdown).
         SelectObject(hdc, bold_font);
-        draw_inline_percent(hdc, layout, layout.row1_y, inputs.session_pct, inputs.model, inputs.is_dark);
-        draw_inline_percent(hdc, layout, layout.row2_y, inputs.weekly_pct, inputs.model, inputs.is_dark);
+        SetTextColor(hdc, COLORREF(text_color.into_colorref()));
+        draw_percent(hdc, layout, layout.row1_y, inputs.session_pct);
+        draw_percent(hdc, layout, layout.row2_y, inputs.weekly_pct);
 
         // Countdown on the right.
         SelectObject(hdc, main_font);
@@ -1335,74 +1349,25 @@ fn draw_label(hdc: HDC, layout: &BarLayout, row_top: i32, text: &str) {
     }
 }
 
-fn draw_inline_percent(
-    hdc: HDC,
-    layout: &BarLayout,
-    row_top: i32,
-    pct: Option<f64>,
-    model: TrayIconKind,
-    is_dark: bool,
-) {
+fn draw_percent(hdc: HDC, layout: &BarLayout, row_top: i32, pct: Option<f64>) {
     let Some(p) = pct else {
         return;
     };
     let text = format!("{:.0}%", p);
-
-    // Measure the percent against the currently-selected font so we can
-    // anchor it to the fill's trailing edge rather than the bar's far right.
-    let mut wide: Vec<u16> = text.encode_utf16().collect();
-    let mut sz = windows::Win32::Foundation::SIZE::default();
-    unsafe {
-        let _ = GetTextExtentPoint32W(hdc, &mut wide, &mut sz);
-    }
-    let text_w = sz.cx;
-
-    let bar_w = layout.bar_right - layout.bar_left;
-    let fill_w = ((p.clamp(0.0, 100.0) / 100.0) * bar_w as f64).round() as i32;
-    let inset = (layout.bar_h / 4).max(2);
-    let fill_color = bar_fill_color(model, is_dark, p);
-    let track_color = if is_dark {
-        Color::from_hex("#3A3A3A")
-    } else {
-        Color::from_hex("#D6D6D6")
-    };
-
-    // Two anchoring modes:
-    //  - Fill is wide enough to hold the percent → right-align the text
-    //    *inside* the fill at its trailing edge. The text sits on the fill.
-    //  - Fill is too narrow → left-align the text just to the right of the
-    //    fill, on the track. The text follows the fill's edge.
-    // Either way the percent is tethered to where the bar reaches.
-    let (text_left, underlying) = if fill_w >= text_w + inset * 2 {
-        let right = layout.bar_left + fill_w - inset;
-        ((right - text_w).max(layout.bar_left + inset), fill_color)
-    } else {
-        let left = layout.bar_left + fill_w + inset;
-        let clamped = left.min(layout.bar_right - text_w - inset).max(layout.bar_left + inset);
-        (clamped, track_color)
-    };
-
-    let fg = if use_dark_text_over(underlying) {
-        Color::from_hex("#101010")
-    } else {
-        Color::from_hex("#F5F5F5")
-    };
-
     let mut text_buf = wide_str(&text);
     let len_no_nul = text_buf.len().saturating_sub(1);
     let mut rect = RECT {
-        left: text_left,
-        top: row_top - 2,
-        right: (text_left + text_w).min(layout.bar_right),
-        bottom: row_top + layout.bar_h + 2,
+        left: layout.percent_left,
+        top: row_top,
+        right: layout.percent_right,
+        bottom: row_top + layout.bar_h,
     };
     unsafe {
-        SetTextColor(hdc, COLORREF(fg.into_colorref()));
         let _ = DrawTextW(
             hdc,
             &mut text_buf[..len_no_nul],
             &mut rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
         );
     }
 }
