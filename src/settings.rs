@@ -14,6 +14,11 @@ pub const POLL_5_MIN: u32 = 5 * 60_000;
 pub const POLL_15_MIN: u32 = 15 * 60_000;
 pub const POLL_1_HOUR: u32 = 60 * 60_000;
 
+// Update-check intervals (seconds). `None` means auto-check is disabled.
+pub const UPDATE_CHECK_HOURLY_SECS: u64 = 60 * 60;
+pub const UPDATE_CHECK_DAILY_SECS: u64 = 24 * 60 * 60;
+pub const UPDATE_CHECK_WEEKLY_SECS: u64 = 7 * 24 * 60 * 60;
+
 fn default_show_claude() -> bool {
     true
 }
@@ -28,6 +33,9 @@ fn default_bubble_size() -> i32 {
 }
 fn default_poll_interval_ms() -> u32 {
     POLL_5_MIN
+}
+fn default_update_check_interval_secs() -> Option<u64> {
+    Some(UPDATE_CHECK_HOURLY_SECS)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +85,8 @@ pub struct Settings {
     pub language: Option<String>,
     #[serde(default)]
     pub last_update_check_unix: Option<u64>,
+    #[serde(default = "default_update_check_interval_secs")]
+    pub update_check_interval_secs: Option<u64>,
     #[serde(default = "default_widget_visible")]
     pub widget_visible: bool,
 }
@@ -91,6 +101,7 @@ impl Default for Settings {
             poll_interval_ms: default_poll_interval_ms(),
             language: None,
             last_update_check_unix: None,
+            update_check_interval_secs: default_update_check_interval_secs(),
             widget_visible: default_widget_visible(),
         }
     }

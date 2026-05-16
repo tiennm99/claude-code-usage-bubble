@@ -83,8 +83,9 @@ corner of your primary monitor on first launch. Drag it where you want it,
 release to snap to the nearest edge if you let go close to one.
 
 - **Left-click** the bubble to open the expanded panel (5h + 7d + countdowns)
-- **Right-click** for refresh, models, update frequency, language, "Start
-  with Windows", updates, exit
+- **Right-click** for refresh, models, refresh frequency, language, "Start
+  with Windows", auto-update check (Disabled / Hourly / Daily / Weekly),
+  manual "Check for updates", exit
 - **Drag** anywhere — it floats on top of all other windows
 - **Ctrl + MouseWheel** on the bubble to resize it
 - **Tray icon** (if enabled): left-click toggles the bubble visibility,

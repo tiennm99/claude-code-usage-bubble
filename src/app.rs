@@ -45,7 +45,8 @@ const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\
 const STARTUP_VALUE_NAME: &str = "ClaudeCodeUsageBubble";
 const APP_CLASS_NAME: &str = "ClaudeCodeUsageBubbleApp";
 const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
-const UPDATE_CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
+// The auto-check interval is user-configurable (see
+// `Settings::update_check_interval_secs`). `None` means auto-check is disabled.
 const BALLOON_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -63,7 +64,16 @@ const IDM_START_WITH_WINDOWS: u16 = 30;
 const IDM_RESET_POSITION: u16 = 31;
 const IDM_VERSION_ACTION: u16 = 32;
 const IDM_LANG_SYSTEM: u16 = 40;
-const IDM_LANG_BASE: u16 = 41;
+// 50 is reserved by tray::IDM_TOGGLE_WIDGET — keep the auto-update range
+// clear of it (and any future tray ids in the 5x band).
+const IDM_UPDATE_AUTO_OFF: u16 = 60;
+const IDM_UPDATE_AUTO_HOURLY: u16 = 61;
+const IDM_UPDATE_AUTO_DAILY: u16 = 62;
+const IDM_UPDATE_AUTO_WEEKLY: u16 = 63;
+// IMPORTANT: language ids are dynamic and start at IDM_LANG_BASE.
+// Keep IDM_LANG_BASE the highest static id so the catch-all match arm
+// stays unambiguous.
+const IDM_LANG_BASE: u16 = 100;
 
 // ---------- State ----------
 
@@ -349,6 +359,16 @@ pub fn on_menu_command(id: u32, _owner_hwnd: HWND) {
         IDM_START_WITH_WINDOWS => toggle_startup(),
         IDM_RESET_POSITION => reset_positions(),
         IDM_VERSION_ACTION => version_action(),
+        IDM_UPDATE_AUTO_OFF => set_update_check_interval(None),
+        IDM_UPDATE_AUTO_HOURLY => {
+            set_update_check_interval(Some(settings::UPDATE_CHECK_HOURLY_SECS))
+        }
+        IDM_UPDATE_AUTO_DAILY => {
+            set_update_check_interval(Some(settings::UPDATE_CHECK_DAILY_SECS))
+        }
+        IDM_UPDATE_AUTO_WEEKLY => {
+            set_update_check_interval(Some(settings::UPDATE_CHECK_WEEKLY_SECS))
+        }
         IDM_LANG_SYSTEM => set_language(None),
         x if x >= IDM_LANG_BASE => set_language_by_index((x - IDM_LANG_BASE) as usize),
         tray::IDM_TOGGLE_WIDGET => toggle_widget_visibility(),
@@ -730,6 +750,7 @@ struct ContextMenuSnapshot {
     available: Vec<(String, String)>,
     language_override: Option<String>,
     current_interval: u32,
+    update_check_interval_secs: Option<u64>,
     show_claude: bool,
     show_chatgpt: bool,
     widget_visible: bool,
@@ -748,6 +769,7 @@ fn show_context_menu(owner_hwnd: HWND) {
                 .collect(),
             language_override: s.settings.language.clone(),
             current_interval: s.settings.poll_interval_ms,
+            update_check_interval_secs: s.settings.update_check_interval_secs,
             show_claude: s.settings.show_claude_code,
             show_chatgpt: s.settings.show_codex,
             widget_visible: s.settings.widget_visible,
@@ -844,6 +866,34 @@ fn show_context_menu(owner_hwnd: HWND) {
             MENU_ITEM_FLAGS(0)
         };
         append_item(settings_menu, IDM_VERSION_ACTION, &version_label, version_flags);
+
+        let auto_update = CreatePopupMenu().unwrap();
+        for (id, value, label) in [
+            (IDM_UPDATE_AUTO_OFF, None, &snap.strings.auto_check_disabled),
+            (
+                IDM_UPDATE_AUTO_HOURLY,
+                Some(settings::UPDATE_CHECK_HOURLY_SECS),
+                &snap.strings.auto_check_hourly,
+            ),
+            (
+                IDM_UPDATE_AUTO_DAILY,
+                Some(settings::UPDATE_CHECK_DAILY_SECS),
+                &snap.strings.auto_check_daily,
+            ),
+            (
+                IDM_UPDATE_AUTO_WEEKLY,
+                Some(settings::UPDATE_CHECK_WEEKLY_SECS),
+                &snap.strings.auto_check_weekly,
+            ),
+        ] {
+            let flags = if value == snap.update_check_interval_secs {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            };
+            append_item(auto_update, id, label, flags);
+        }
+        append_submenu(settings_menu, auto_update, &snap.strings.auto_update_check);
         append_submenu(menu, settings_menu, &snap.strings.settings);
 
         append_item(
@@ -1067,18 +1117,27 @@ fn version_action() {
 }
 
 fn schedule_update_check_timer(hwnd: HWND) {
-    let last = lock_state()
-        .as_ref()
-        .and_then(|s| s.settings.last_update_check_unix);
+    let (last, interval) = match lock_state().as_ref() {
+        Some(s) => (
+            s.settings.last_update_check_unix,
+            s.settings.update_check_interval_secs,
+        ),
+        None => return,
+    };
+    let Some(interval) = interval else {
+        // Auto-check disabled. Manual "Check for updates" still works via
+        // the menu; this just suppresses the timer.
+        return;
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let due = last.map_or(true, |t| now.saturating_sub(t) >= UPDATE_CHECK_INTERVAL_SECS);
+    let due = last.map_or(true, |t| now.saturating_sub(t) >= interval);
     if due {
         begin_update_check(hwnd);
     } else {
-        let remaining = UPDATE_CHECK_INTERVAL_SECS.saturating_sub(now.saturating_sub(last.unwrap_or(0)));
+        let remaining = interval.saturating_sub(now.saturating_sub(last.unwrap_or(0)));
         let ms = (remaining.saturating_mul(1000).min(u32::MAX as u64)) as u32;
         unsafe {
             SetTimer(hwnd, TIMER_UPDATE_CHECK, ms, None);
@@ -1117,21 +1176,39 @@ fn begin_update_check(hwnd: HWND) {
                         s.update_status = UpdateStatus::Failed;
                     }
                 }
-                s.settings.clone()
+                (s.settings.clone(), s.settings.update_check_interval_secs)
             })
         };
-        if let Some(snap) = snap_opt {
+        let next_interval = snap_opt.as_ref().and_then(|(_, iv)| *iv);
+        if let Some((snap, _)) = snap_opt {
             settings::save(&snap);
         }
-        unsafe {
-            SetTimer(
-                send_hwnd.to_hwnd(),
-                TIMER_UPDATE_CHECK,
-                (UPDATE_CHECK_INTERVAL_SECS as u32) * 1000,
-                None,
-            );
+        if let Some(interval) = next_interval {
+            let ms = (interval.saturating_mul(1000).min(u32::MAX as u64)) as u32;
+            unsafe {
+                SetTimer(send_hwnd.to_hwnd(), TIMER_UPDATE_CHECK, ms, None);
+            }
         }
     });
+}
+
+fn set_update_check_interval(value: Option<u64>) {
+    let (snap, msg_hwnd) = {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
+            return;
+        };
+        s.settings.update_check_interval_secs = value;
+        (s.settings.clone(), s.msg_hwnd)
+    };
+    settings::save(&snap);
+    let hwnd = msg_hwnd.to_hwnd();
+    unsafe {
+        let _ = KillTimer(hwnd, TIMER_UPDATE_CHECK);
+    }
+    if value.is_some() {
+        schedule_update_check_timer(hwnd);
+    }
 }
 
 // ---------- Start-with-Windows ----------
