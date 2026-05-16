@@ -269,7 +269,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
     } else {
         Color::from_hex("#D6D6D6")
     };
-    let accent = bar_color_for(data.session_pct.max(data.weekly_pct), data.is_dark);
+    let accent = bar_color_for(data.model, data.session_pct.max(data.weekly_pct), data.is_dark);
 
     unsafe {
         let bg_brush = CreateSolidBrush(COLORREF(bg.into_colorref()));
@@ -482,8 +482,8 @@ fn draw_text(
     }
 }
 
-fn bar_color_for(percent: f64, _is_dark: bool) -> Color {
-    crate::bubble::ring_color_for_percent(percent)
+fn bar_color_for(model: ProviderId, percent: f64, is_dark: bool) -> Color {
+    crate::bubble::bar_fill_color(model, is_dark, percent)
 }
 
 fn clone_data() -> Option<PanelData> {

@@ -877,7 +877,11 @@ fn check_fullscreen(bubble_hwnd: HWND) {
 
 const ACCENT_STRIPE_W_LOGICAL: i32 = 4;
 const LABEL_PAD_LOGICAL: i32 = 6;
-const COUNTDOWN_TEMPLATE: &str = "100% \u{00b7} 23h";
+// Worst-case width-probe for the right-side countdown column. The bubble
+// renders countdown-only (percent moved inline), so this is just "N{suffix}"
+// for the longest reasonable duration. Bumped from "100% · 23h" which had
+// been sized for the old combined string and left a big empty gap.
+const COUNTDOWN_TEMPLATE: &str = "999d";
 
 struct BarLayout {
     /// Bubble width in pixels.
@@ -1175,8 +1179,8 @@ fn paint_bars(pixels: &mut [u32], layout: &BarLayout, inputs: &PaintInputs) {
     } else {
         Color::from_hex("#D6D6D6")
     };
-    paint_one_bar(pixels, layout, layout.row1_y, inputs.session_pct, track, inputs.pulse_phase);
-    paint_one_bar(pixels, layout, layout.row2_y, inputs.weekly_pct, track, inputs.pulse_phase);
+    paint_one_bar(pixels, layout, layout.row1_y, inputs.session_pct, track, inputs);
+    paint_one_bar(pixels, layout, layout.row2_y, inputs.weekly_pct, track, inputs);
 }
 
 fn paint_one_bar(
@@ -1185,7 +1189,7 @@ fn paint_one_bar(
     top: i32,
     pct: Option<f64>,
     track: Color,
-    pulse_phase: u32,
+    inputs: &PaintInputs,
 ) {
     let bar_w = layout.bar_right - layout.bar_left;
     if bar_w <= 0 {
@@ -1204,10 +1208,10 @@ fn paint_one_bar(
     if fill_w <= 0 {
         return;
     }
-    let mut accent_rgb = ring_color_for_percent(p);
+    let mut accent_rgb = bar_fill_color(inputs.model, inputs.is_dark, p);
     if p >= 95.0 {
         // Slow brightness triangle: 0.85 → 1.15 over 24 ticks (≈1.9s @ 80ms).
-        let t = pulse_triangle(pulse_phase);
+        let t = pulse_triangle(inputs.pulse_phase);
         accent_rgb = brighten(accent_rgb, t);
     }
     let accent_packed = rgb_to_dib(accent_rgb);
@@ -1276,8 +1280,8 @@ fn paint_text_layer(hdc: HDC, layout: &BarLayout, inputs: &PaintInputs) {
         // Inline percent: drawn over the bar, contrast picked from the pixel
         // under the text (fill if covered, track otherwise).
         SelectObject(hdc, bold_font);
-        draw_inline_percent(hdc, layout, layout.row1_y, inputs.session_pct, inputs.is_dark);
-        draw_inline_percent(hdc, layout, layout.row2_y, inputs.weekly_pct, inputs.is_dark);
+        draw_inline_percent(hdc, layout, layout.row1_y, inputs.session_pct, inputs.model, inputs.is_dark);
+        draw_inline_percent(hdc, layout, layout.row2_y, inputs.weekly_pct, inputs.model, inputs.is_dark);
 
         // Countdown on the right.
         SelectObject(hdc, main_font);
@@ -1336,6 +1340,7 @@ fn draw_inline_percent(
     layout: &BarLayout,
     row_top: i32,
     pct: Option<f64>,
+    model: TrayIconKind,
     is_dark: bool,
 ) {
     let Some(p) = pct else {
@@ -1355,7 +1360,7 @@ fn draw_inline_percent(
     let bar_w = layout.bar_right - layout.bar_left;
     let fill_w = ((p.clamp(0.0, 100.0) / 100.0) * bar_w as f64).round() as i32;
     let inset = (layout.bar_h / 4).max(2);
-    let fill_color = ring_color_for_percent(p);
+    let fill_color = bar_fill_color(model, is_dark, p);
     let track_color = if is_dark {
         Color::from_hex("#3A3A3A")
     } else {
@@ -1406,6 +1411,9 @@ fn draw_countdown(hdc: HDC, layout: &BarLayout, row_top: i32, text: &str) {
     if text.is_empty() {
         return;
     }
+    // Left-align so the countdown sits right next to the bar with only the
+    // `label_pad` gap. Right-aligning to the bubble's far edge left a visible
+    // float between bar end and number.
     let mut text_w = wide_str(text);
     let len_no_nul = text_w.len().saturating_sub(1);
     let mut rect = RECT {
@@ -1419,7 +1427,7 @@ fn draw_countdown(hdc: HDC, layout: &BarLayout, row_top: i32, text: &str) {
             hdc,
             &mut text_w[..len_no_nul],
             &mut rect,
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP | DT_END_ELLIPSIS,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP | DT_END_ELLIPSIS,
         );
     }
 }
@@ -1437,17 +1445,18 @@ fn apply_alpha_mask(pixels: &mut [u32], layout: &BarLayout) {
     }
 }
 
-/// Discrete 4-band color "cliff" — sharper steps than a smooth gradient so
-/// the visual difference between 75% and 85% is unmistakable at the bubble's
-/// 60-90 px bar width.
+/// Discrete 4-band fill color. The "safe" band uses the provider's identity
+/// color so Codex bars stay white-on-dark while Claude bars stay orange; the
+/// warning bands are the same alarm palette regardless of provider so an
+/// approaching-limit always looks the same to the eye.
 ///
-/// - <60%   → Claude orange (#D97757)
-/// - 60–80% → amber         (#E0A040)
-/// - 80–95% → red           (#C45020)
-/// - ≥95%   → deep red      (#A01818) — paired with pulse animation in render
-pub fn ring_color_for_percent(percent: f64) -> Color {
+/// - <60%   → provider accent (Claude `#D97757` / Codex theme-derived)
+/// - 60–80% → amber           (#E0A040)
+/// - 80–95% → red             (#C45020)
+/// - ≥95%   → deep red        (#A01818) — paired with pulse animation
+pub fn bar_fill_color(model: TrayIconKind, is_dark: bool, percent: f64) -> Color {
     if percent < 60.0 {
-        Color::from_hex("#D97757")
+        accent_color_for(model, is_dark)
     } else if percent < 80.0 {
         Color::from_hex("#E0A040")
     } else if percent < 95.0 {
