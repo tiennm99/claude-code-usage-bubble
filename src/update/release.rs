@@ -12,6 +12,10 @@ const REPO_NAME: &str = "claude-code-usage-bubble";
 pub struct Release {
     pub version: Version,
     pub asset_url: String,
+    /// SHA-256 of the asset bytes, parsed from the GitHub Releases
+    /// API `digest` field. `None` if GitHub omitted it (older
+    /// releases predate the digest field).
+    pub asset_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -71,7 +75,26 @@ pub fn fetch_latest(http: &Client) -> Result<super::CheckOutcome, super::Error> 
     Ok(super::CheckOutcome::Available(Release {
         version: candidate,
         asset_url: asset.browser_download_url.clone(),
+        asset_sha256: asset.digest.as_deref().and_then(parse_sha256_digest),
     }))
+}
+
+/// Parse a GitHub `digest` field of the form `"sha256:<64 hex chars>"`
+/// into a 32-byte array. Returns `None` for any other algorithm or
+/// malformed input — callers should treat a missing digest as "no
+/// integrity check available" rather than as a parse failure.
+fn parse_sha256_digest(raw: &str) -> Option<[u8; 32]> {
+    let hex = raw.strip_prefix("sha256:")?;
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte_chars) in hex.as_bytes().chunks(2).enumerate() {
+        let high = (byte_chars[0] as char).to_digit(16)?;
+        let low = (byte_chars[1] as char).to_digit(16)?;
+        out[i] = ((high << 4) | low) as u8;
+    }
+    Some(out)
 }
 
 pub fn user_agent() -> &'static str {
@@ -88,4 +111,9 @@ struct GhRelease {
 struct GhAsset {
     name: String,
     browser_download_url: String,
+    /// GitHub started returning `digest: "sha256:..."` on the asset
+    /// object in 2024. Older releases omit it; we treat that as
+    /// "verification unavailable" rather than a hard error.
+    #[serde(default)]
+    digest: Option<String>,
 }

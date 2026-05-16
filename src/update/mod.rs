@@ -20,6 +20,10 @@ pub enum Error {
     NotWritable(String),
     #[error("malformed version: {0}")]
     BadVersion(String),
+    #[error("asset checksum mismatch: expected {expected}, got {actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+    #[error("path rejected for safety: {0}")]
+    UnsafePath(String),
 }
 
 pub use channel::{current as current_channel, Channel};

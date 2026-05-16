@@ -9,6 +9,8 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use sha2::{Digest, Sha256};
+
 use crate::net::Client;
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -18,10 +20,17 @@ pub fn begin(http: &Client, release: &super::Release) -> Result<(), super::Error
     let current = std::env::current_exe()?;
     ensure_writable(&current)?;
     let staging = stage_path()?;
+    // Refuse to proceed if either path contains `%`. Inside double quotes
+    // cmd.exe still expands `%var%` references, so a path containing `%`
+    // would let cmd substitute environment variables into the swap step.
+    // Such paths are vanishingly rare on real Windows installs; failing
+    // fast is safer than rolling a bespoke cmd-escape layer.
+    reject_unsafe_path(&current)?;
+    reject_unsafe_path(&staging)?;
     if let Some(parent) = staging.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    download(http, &release.asset_url, &staging)?;
+    download(http, &release.asset_url, &staging, release.asset_sha256.as_ref())?;
     spawn_handoff(&staging, &current)?;
     Ok(())
 }
@@ -38,7 +47,12 @@ pub fn run_cli(args: &[String]) -> Option<i32> {
     }
 }
 
-fn download(http: &Client, url: &str, to: &std::path::Path) -> Result<(), super::Error> {
+fn download(
+    http: &Client,
+    url: &str,
+    to: &std::path::Path,
+    expected_sha256: Option<&[u8; 32]>,
+) -> Result<(), super::Error> {
     let resp = http
         .get(url)
         .header("User-Agent", super::release::user_agent())
@@ -46,7 +60,39 @@ fn download(http: &Client, url: &str, to: &std::path::Path) -> Result<(), super:
     if !(200..300).contains(&resp.status()) {
         return Err(super::Error::Network(crate::net::Error::Status(resp.status())));
     }
-    std::fs::write(to, resp.body())?;
+    let body = resp.body();
+    if let Some(expected) = expected_sha256 {
+        let mut hasher = Sha256::new();
+        hasher.update(body);
+        let actual = hasher.finalize();
+        if actual.as_slice() != expected {
+            return Err(super::Error::ChecksumMismatch {
+                expected: hex_encode(expected),
+                actual: hex_encode(&actual),
+            });
+        }
+    }
+    std::fs::write(to, body)?;
+    Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn reject_unsafe_path(p: &std::path::Path) -> Result<(), super::Error> {
+    let s = p.to_string_lossy();
+    if s.contains('%') {
+        return Err(super::Error::UnsafePath(format!(
+            "path contains '%' which cmd.exe expands as a variable: {s}"
+        )));
+    }
     Ok(())
 }
 
