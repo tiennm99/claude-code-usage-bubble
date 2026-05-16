@@ -468,39 +468,57 @@ fn apply_results(
     results: Vec<(ProviderId, Result<UsageWindows, usage::Error>)>,
 ) -> Vec<ProviderId> {
     let mut auth_failures = Vec::new();
-    let mut s = lock_state();
-    let Some(s) = s.as_mut() else {
-        return auth_failures;
-    };
-    if results.is_empty() {
-        return auth_failures;
-    }
-    let strings = s.i18n.strings().clone();
-    let mut any_ok = false;
-    for (id, outcome) in results {
-        match outcome {
-            Ok(windows) => {
-                let entry = s.snapshots.entry(id).or_default();
-                entry.windows = windows;
-                entry.primary_text = i18n::format_window(&windows.primary, &strings);
-                entry.secondary_text = i18n::format_window(&windows.secondary, &strings);
-                any_ok = true;
-            }
-            Err(usage::Error::AuthRequired | usage::Error::TokenExpired) => {
-                auth_failures.push(id);
-                let entry = s.snapshots.entry(id).or_default();
-                entry.primary_text = "!".into();
-                entry.secondary_text = "!".into();
-            }
-            Err(e) => {
-                log::warn!("provider {id:?} poll failed: {e}");
-                let entry = s.snapshots.entry(id).or_default();
-                entry.primary_text = "…".into();
-                entry.secondary_text = "…".into();
+    let mut crossings: Vec<(ProviderId, u8)> = Vec::new();
+    {
+        let mut guard = lock_state();
+        let Some(state) = guard.as_mut() else {
+            return auth_failures;
+        };
+        if results.is_empty() {
+            return auth_failures;
+        }
+        let strings = state.i18n.strings().clone();
+        let mut any_ok = false;
+        for (id, outcome) in results {
+            match outcome {
+                Ok(windows) => {
+                    let entry = state.snapshots.entry(id).or_default();
+                    let old_pct = entry.windows.primary.utilization;
+                    let new_pct = windows.primary.utilization;
+                    // Fire a balloon only the cycle a provider CROSSES a
+                    // threshold so the user is nudged once, not on every
+                    // subsequent poll while parked above it.
+                    for threshold in [80u8, 95u8] {
+                        if old_pct < threshold as f64 && new_pct >= threshold as f64 {
+                            crossings.push((id, threshold));
+                        }
+                    }
+                    entry.windows = windows;
+                    entry.primary_text = i18n::format_window(&windows.primary, &strings);
+                    entry.secondary_text = i18n::format_window(&windows.secondary, &strings);
+                    any_ok = true;
+                }
+                Err(usage::Error::AuthRequired | usage::Error::TokenExpired) => {
+                    auth_failures.push(id);
+                    let entry = state.snapshots.entry(id).or_default();
+                    entry.primary_text = "!".into();
+                    entry.secondary_text = "!".into();
+                }
+                Err(e) => {
+                    log::warn!("provider {id:?} poll failed: {e}");
+                    let entry = state.snapshots.entry(id).or_default();
+                    entry.primary_text = "…".into();
+                    entry.secondary_text = "…".into();
+                }
             }
         }
+        state.last_poll_ok = any_ok;
     }
-    s.last_poll_ok = any_ok;
+    // Lock released. Fire any threshold balloons outside the critical
+    // section so tray::notify and i18n cloning don't block the UI thread.
+    for (id, threshold) in crossings {
+        show_threshold_balloon(id, threshold);
+    }
     auth_failures
 }
 
@@ -750,6 +768,60 @@ fn handle_tray_action(action: TrayAction) {
             }
         }
     }
+}
+
+/// Re-read the system theme and, if it changed, push the new value into
+/// the UI. Called from each bubble's WM_SETTINGCHANGE handler — Windows
+/// posts that to every top-level window when the user toggles light/dark
+/// in Settings, so this naturally fires once per change.
+pub fn recheck_theme() {
+    let now_dark = os::theme::is_dark();
+    let changed = {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
+            return;
+        };
+        if s.is_dark == now_dark {
+            false
+        } else {
+            s.is_dark = now_dark;
+            true
+        }
+    };
+    if changed {
+        propagate_to_ui();
+        refresh_tray_icons();
+    }
+}
+
+fn show_threshold_balloon(provider: ProviderId, threshold: u8) {
+    let payload = {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
+            return;
+        };
+        // Reuse the same cooldown as the token-expired balloon: any one
+        // balloon at a time keeps notifications calm.
+        if let Some(last) = s.last_balloon_at {
+            if last.elapsed() < BALLOON_COOLDOWN {
+                return;
+            }
+        }
+        s.last_balloon_at = Some(Instant::now());
+        let strings = s.i18n.strings();
+        let provider_label = match provider {
+            ProviderId::Claude => strings.claude_label.clone(),
+            ProviderId::ChatGpt => strings.chatgpt_label.clone(),
+        };
+        let title = format!("{provider_label} · {threshold}%");
+        let body = if threshold >= 95 {
+            strings.threshold_95_body.clone()
+        } else {
+            strings.threshold_80_body.clone()
+        };
+        (s.msg_hwnd, provider, title, body)
+    };
+    tray::notify(payload.0.to_hwnd(), payload.1, &payload.2, &payload.3);
 }
 
 fn show_token_expired_balloon(failed: ProviderId) {

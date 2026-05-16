@@ -61,6 +61,12 @@ pub struct LocaleStrings {
     pub token_expired_body: String,
     pub chatgpt_token_expired_title: String,
     pub chatgpt_token_expired_body: String,
+    /// Body text for "your usage just crossed 80% of the 5h limit". The
+    /// title is composed from the provider label + percent so it does not
+    /// need to be translated separately.
+    pub threshold_80_body: String,
+    /// Body text for the 95% threshold balloon.
+    pub threshold_95_body: String,
 }
 
 #[derive(Deserialize)]

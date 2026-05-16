@@ -478,10 +478,13 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_SETTINGCHANGE => {
-            // Taskbar move / auto-hide toggle / DPI change all post this.
-            // Just re-clamp into the new work area so the bubble can't end up
-            // hidden behind the new taskbar position.
+            // Taskbar move / auto-hide toggle / DPI change / theme toggle
+            // all post this. Re-clamp into the new work area (bubble must
+            // not end up hidden behind the new taskbar position) and ask
+            // the app to re-read the light/dark setting — Windows fires
+            // this message when the user flips the OS theme in Settings.
             clamp_into_work_area(hwnd);
+            crate::app::recheck_theme();
             LRESULT(0)
         }
         WM_DESTROY => {
