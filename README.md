@@ -55,10 +55,21 @@ environment.
 
 ## Install
 
-Until packaged binaries are published, build from source:
+### Download the latest release
+
+Grab `claude-code-usage-bubble.exe` from the
+[Releases page](https://github.com/tiennm99/claude-code-usage-bubble/releases/latest).
+Put it anywhere on disk (e.g. `%LOCALAPPDATA%\ClaudeCodeUsageBubble\`) and
+run it. The app self-updates from the same Releases feed.
+
+**First-run note:** the binary is unsigned, so SmartScreen will show
+"Windows protected your PC". Click **More info** → **Run anyway**. Code
+signing is on the roadmap.
+
+### Build from source
 
 ```powershell
-git clone https://github.com/<your-fork>/claude-code-usage-bubble
+git clone https://github.com/tiennm99/claude-code-usage-bubble
 cd claude-code-usage-bubble
 cargo build --release
 ```
