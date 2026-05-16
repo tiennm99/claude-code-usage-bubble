@@ -1,6 +1,6 @@
 [package]
 name = "claude-code-usage-bubble"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 license = "Apache-2.0"
 description = "Floating bubble showing Claude Code and Codex usage on Windows"
@@ -8,11 +8,6 @@ homepage = "https://github.com/tiennm99/claude-code-usage-bubble"
 repository = "https://github.com/tiennm99/claude-code-usage-bubble"
 
 [dependencies]
-# `ureq` + `native-tls` are kept while the legacy `poller.rs` and `updater.rs`
-# modules survive. Phase 4 deletes `poller.rs` and Phase 6 deletes `updater.rs`,
-# at which point these two deps go away in favour of `net::winhttp`.
-ureq = { version = "2", default-features = false, features = ["native-tls", "json", "proxy-from-env"] }
-native-tls = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
