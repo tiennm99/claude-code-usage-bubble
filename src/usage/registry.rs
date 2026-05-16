@@ -1,0 +1,61 @@
+// Provider registry: holds every enabled provider and dispatches polls.
+//
+// The app owns one `Registry` and calls `poll_enabled(http, settings)` on
+// every cycle. The result is a flat list of `(id, Result<UsageWindows>)`
+// pairs the app can apply to its state.
+
+use crate::creds::Locator;
+use crate::net::Client;
+use crate::settings::Settings;
+use crate::usage::{anthropic::ClaudeProvider, chatgpt::ChatGptProvider, refresh, Error, ProviderId, UsageProvider, UsageWindows};
+
+pub struct Registry {
+    claude: ClaudeProvider,
+    chatgpt: ChatGptProvider,
+}
+
+impl Registry {
+    pub fn with_defaults() -> Self {
+        Self {
+            claude: ClaudeProvider::new(Locator::for_claude()),
+            chatgpt: ChatGptProvider::new(Locator::for_chatgpt()),
+        }
+    }
+
+    pub fn poll_enabled(
+        &mut self,
+        http: &Client,
+        settings: &Settings,
+    ) -> Vec<(ProviderId, Result<UsageWindows, Error>)> {
+        let mut out = Vec::new();
+        if settings.show_claude_code {
+            out.push((ProviderId::Claude, self.claude.poll(http)));
+        }
+        if settings.show_codex {
+            out.push((ProviderId::ChatGpt, self.chatgpt.poll(http)));
+        }
+        out
+    }
+
+    /// Attempt to refresh the active source for one provider.
+    pub fn try_refresh(&self, id: ProviderId, orchestrator: &refresh::Orchestrator) -> refresh::Outcome {
+        let locator = match id {
+            ProviderId::Claude => self.claude.locator(),
+            ProviderId::ChatGpt => self.chatgpt.locator(),
+        };
+        match locator.first_available() {
+            Some(src) => orchestrator.refresh(src),
+            None => refresh::Outcome::CliMissing,
+        }
+    }
+
+    /// Snapshot of credential-file fingerprints across both providers —
+    /// used to detect external re-authentication between poll cycles.
+    pub fn credential_signatures(&self) -> Vec<String> {
+        let mut sigs = self.claude.locator().signatures();
+        sigs.extend(self.chatgpt.locator().signatures());
+        sigs.sort();
+        sigs.dedup();
+        sigs
+    }
+}

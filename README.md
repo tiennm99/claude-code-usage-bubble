@@ -11,20 +11,16 @@ Drop it anywhere on screen, drag it around, snap it to a monitor edge,
 left-click for a panel with both your 5-hour and 7-day windows, right-click
 for the menu.
 
-## Differences vs upstream
+## Acknowledgements
 
-This project is a derivative of
-[CodeZeno/Claude-Code-Usage-Monitor](https://github.com/CodeZeno/Claude-Code-Usage-Monitor)
-(MIT, © 2026 Code Zeno Pty Ltd). The usage-polling, updater, tray-icon,
-localization, theme-detection, and diagnostic modules are ported from that
-codebase with minor adaptations.
-
-The original app embeds a horizontal widget directly into the Windows
-taskbar. This fork replaces that UI with a **floating circular bubble that
-the user can drag anywhere on screen**, plus an on-demand expanded panel.
-Everything else (credential reading, OAuth refresh via the Claude/Codex
-CLI, WSL credential support, GitHub self-update, eight languages) behaves
-the same.
+Inspired by [CodeZeno/Claude-Code-Usage-Monitor](https://github.com/CodeZeno/Claude-Code-Usage-Monitor),
+which solves the same "how close am I to the Claude Code limit?" problem
+with a horizontal taskbar widget. This project takes the UX in a different
+direction — a floating, draggable circular bubble that the user can place
+anywhere on screen — and is a clean-room implementation: the HTTP client,
+provider polling, credential discovery, localisation, tray rendering, and
+self-updater are all written from scratch against the same public APIs
+(Anthropic, ChatGPT, GitHub Releases).
 
 ## What you get
 
@@ -141,7 +137,4 @@ your Codex `auth.json` directly.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE). This project is a derivative of
-[CodeZeno/Claude-Code-Usage-Monitor](https://github.com/CodeZeno/Claude-Code-Usage-Monitor)
-(MIT). Upstream attribution and the original MIT terms for the ported portions
-are recorded in [NOTICE](NOTICE).
+Apache License 2.0 — see [LICENSE](LICENSE).

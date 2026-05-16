@@ -18,9 +18,11 @@ use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::diagnose;
-use crate::native_interop::{wide_str, Color, TIMER_FULLSCREEN_CHECK};
-use crate::tray_icon::TrayIconKind;
+use crate::os::{to_utf16_nul as wide_str, Rgb as Color};
+
+const TIMER_FULLSCREEN_CHECK: usize = 5;
+use crate::usage::ProviderId;
+type TrayIconKind = ProviderId;
 
 // ---------- Public types & API ----------
 
@@ -58,7 +60,7 @@ pub fn register_class() {
             ..Default::default()
         };
         if RegisterClassExW(&wc) == 0 {
-            diagnose::log("bubble RegisterClassExW returned 0");
+            log::error!("bubble RegisterClassExW returned 0");
         }
     });
 }
@@ -98,7 +100,7 @@ pub fn create(config: BubbleConfig) -> HWND {
     };
 
     if hwnd == HWND::default() {
-        diagnose::log("bubble CreateWindowExW failed");
+        log::error!("bubble CreateWindowExW failed");
         return hwnd;
     }
 
@@ -807,8 +809,8 @@ fn default_position(size_px: i32, model: TrayIconKind) -> (i32, i32) {
         };
         let gap = 24;
         let stagger = match model {
-            TrayIconKind::Claude => 0,
-            TrayIconKind::Codex => size_px + gap,
+            ProviderId::Claude => 0,
+            ProviderId::ChatGpt => size_px + gap,
         };
         let x = wa.right - size_px - gap;
         let y = wa.bottom - size_px - gap - stagger;

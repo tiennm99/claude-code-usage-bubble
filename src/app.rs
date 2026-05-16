@@ -1,6 +1,9 @@
-// Application orchestrator: single-instance mutex, settings, polling thread,
-// tray icons, context menu, message-only window for cross-thread updates, and
-// dispatch from bubble UI callbacks.
+// App orchestrator.
+//
+// One `Mutex<Option<AppState>>` is the single source of truth. The UI
+// thread runs the message loop; a background thread polls the provider
+// registry and posts `WM_APP_USAGE_UPDATED` back via a hidden
+// message-only window owned by this module.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -9,59 +12,58 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::HiDpi::*;
+use windows::Win32::UI::HiDpi::{
+    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::bubble;
-use crate::diagnose;
-use crate::localization::{self, LanguageId, Strings};
-use crate::models::AppUsageData;
-use crate::native_interop::{
-    wide_str, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
-    WM_APP_USAGE_UPDATED,
-};
+use crate::i18n::{self, I18n, LocaleStrings};
+// Win32 message + timer IDs moved inline; see constants below.
+use crate::net;
+use crate::os;
 use crate::panel::{self, PanelData};
-use crate::poller::{self, PollError};
-use crate::settings::{self, BubblePositions, Settings, POLL_15_MIN, POLL_1_HOUR, POLL_1_MIN, POLL_5_MIN};
-use crate::theme;
-use crate::tray_icon::{self, TrayAction, TrayIconData, TrayIconKind};
-use crate::updater::{self, InstallChannel, UpdateCheckResult};
+use crate::settings::{self, Settings, POLL_15_MIN, POLL_1_HOUR, POLL_1_MIN, POLL_5_MIN};
+use crate::tray::{self, TrayAction, TrayIcon as TrayIconData};
+use crate::usage::ProviderId as TrayIconKind;
+use crate::tray::WM_APP_TRAY;
+use crate::update::{self, Channel as InstallChannel, CheckOutcome};
+use crate::usage::{self, ProviderId, Registry, UsageWindows};
 
-const APP_MUTEX_NAME: &str = "Global\\ClaudeCodeUsageBubble";
+// Win32 message IDs owned by this module.
+pub const WM_APP_USAGE_UPDATED: u32 = 0x8001;
+
+// Timer IDs used with `SetTimer(msg_hwnd, …)`.
+const TIMER_POLL: usize = 1;
+const TIMER_COUNTDOWN: usize = 2;
+const TIMER_RESET_POLL: usize = 3;
+const TIMER_UPDATE_CHECK: usize = 4;
+
+const APP_MUTEX_NAME: &str = r"Global\ClaudeCodeUsageBubble";
 const STARTUP_REGISTRY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const STARTUP_VALUE_NAME: &str = "ClaudeCodeUsageBubble";
 const APP_CLASS_NAME: &str = "ClaudeCodeUsageBubbleApp";
+const HTTP_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 const UPDATE_CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
-const RETRY_BASE_MS: u32 = 30_000;
+const BALLOON_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 
-// ---------- Menu command IDs ----------
+// ---------- Menu IDs ----------
 
 const IDM_REFRESH: u16 = 1;
 const IDM_EXIT: u16 = 2;
-
 const IDM_FREQ_1MIN: u16 = 10;
 const IDM_FREQ_5MIN: u16 = 11;
 const IDM_FREQ_15MIN: u16 = 12;
 const IDM_FREQ_1HOUR: u16 = 13;
-
-const IDM_MODEL_CLAUDE_CODE: u16 = 20;
-const IDM_MODEL_CODEX: u16 = 21;
-
+const IDM_MODEL_CLAUDE: u16 = 20;
+const IDM_MODEL_CHATGPT: u16 = 21;
 const IDM_START_WITH_WINDOWS: u16 = 30;
 const IDM_RESET_POSITION: u16 = 31;
 const IDM_VERSION_ACTION: u16 = 32;
-
 const IDM_LANG_SYSTEM: u16 = 40;
-const IDM_LANG_ENGLISH: u16 = 41;
-const IDM_LANG_DUTCH: u16 = 42;
-const IDM_LANG_SPANISH: u16 = 43;
-const IDM_LANG_FRENCH: u16 = 44;
-const IDM_LANG_GERMAN: u16 = 45;
-const IDM_LANG_JAPANESE: u16 = 46;
-const IDM_LANG_KOREAN: u16 = 47;
-const IDM_LANG_TRADITIONAL_CHINESE: u16 = 48;
+const IDM_LANG_BASE: u16 = 41;
 
 // ---------- State ----------
 
@@ -89,50 +91,25 @@ enum UpdateStatus {
 
 struct AppState {
     msg_hwnd: SendHwnd,
-    bubbles: HashMap<TrayIconKindKey, SendHwnd>,
+    bubbles: HashMap<TrayIconKind, SendHwnd>,
     settings: Settings,
-    language: LanguageId,
+    i18n: I18n,
     is_dark: bool,
     install_channel: InstallChannel,
+    http: net::Client,
+    registry: Registry,
+    snapshots: HashMap<ProviderId, ProviderUiState>,
     last_poll_ok: bool,
-    retry_count: u32,
-    session_text: String,
-    weekly_text: String,
-    codex_session_text: String,
-    codex_weekly_text: String,
-    session_percent: f64,
-    weekly_percent: f64,
-    codex_session_percent: f64,
-    codex_weekly_percent: f64,
-    data: AppUsageData,
     update_status: UpdateStatus,
-    update_release: Option<updater::ReleaseDescriptor>,
-    last_balloon_shown_at: Option<Instant>,
-    auth_watch_mode: poller::CredentialWatchMode,
-    auth_watch_snapshot: poller::CredentialWatchSnapshot,
-    auth_error_paused_polling: bool,
+    update_release: Option<update::Release>,
+    last_balloon_at: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
-enum TrayIconKindKey {
-    Claude,
-    Codex,
-}
-impl From<TrayIconKind> for TrayIconKindKey {
-    fn from(k: TrayIconKind) -> Self {
-        match k {
-            TrayIconKind::Claude => TrayIconKindKey::Claude,
-            TrayIconKind::Codex => TrayIconKindKey::Codex,
-        }
-    }
-}
-impl From<TrayIconKindKey> for TrayIconKind {
-    fn from(k: TrayIconKindKey) -> Self {
-        match k {
-            TrayIconKindKey::Claude => TrayIconKind::Claude,
-            TrayIconKindKey::Codex => TrayIconKind::Codex,
-        }
-    }
+#[derive(Clone, Default)]
+struct ProviderUiState {
+    windows: UsageWindows,
+    primary_text: String,
+    secondary_text: String,
 }
 
 fn state() -> &'static Mutex<Option<AppState>> {
@@ -151,36 +128,39 @@ pub fn run() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
-    // Single-instance guard.
-    let mutex_name = wide_str(APP_MUTEX_NAME);
+    let mutex_name_w = os::to_utf16_nul(APP_MUTEX_NAME);
     let _mutex = unsafe {
-        let handle = CreateMutexW(None, false, PCWSTR::from_raw(mutex_name.as_ptr()));
+        let handle = CreateMutexW(None, false, PCWSTR::from_raw(mutex_name_w.as_ptr()));
         match handle {
             Ok(h) => {
                 if GetLastError() == ERROR_ALREADY_EXISTS {
-                    diagnose::log("startup aborted: another instance is already running");
+                    log::info!("another instance already running; exiting");
                     return;
                 }
                 h
             }
             Err(e) => {
-                diagnose::log_error("startup aborted: unable to create single-instance mutex", e);
+                log::error!("CreateMutex failed: {e}");
                 return;
             }
         }
     };
 
     let settings = settings::load();
-    let language = localization::resolve_language(
-        settings.language.as_deref().and_then(LanguageId::from_code),
-    );
-    let is_dark = theme::is_dark_mode();
-    let install_channel = updater::current_install_channel();
-
+    let i18n = I18n::load(settings.language.as_deref());
+    let is_dark = os::theme::is_dark();
+    let install_channel = update::current_channel();
+    let http = match net::Client::new(HTTP_USER_AGENT) {
+        Ok(c) => c,
+        Err(e) => {
+            log::error!("HTTP client init failed: {e}");
+            return;
+        }
+    };
     let msg_hwnd = match create_message_window() {
         Some(h) => h,
         None => {
-            diagnose::log("startup aborted: unable to create app message window");
+            log::error!("failed to create app message window");
             return;
         }
     };
@@ -189,40 +169,32 @@ pub fn run() {
         msg_hwnd: SendHwnd::from_hwnd(msg_hwnd),
         bubbles: HashMap::new(),
         settings,
-        language,
+        i18n,
         is_dark,
         install_channel,
+        http,
+        registry: Registry::with_defaults(),
+        snapshots: HashMap::new(),
         last_poll_ok: false,
-        retry_count: 0,
-        session_text: String::new(),
-        weekly_text: String::new(),
-        codex_session_text: String::new(),
-        codex_weekly_text: String::new(),
-        session_percent: 0.0,
-        weekly_percent: 0.0,
-        codex_session_percent: 0.0,
-        codex_weekly_percent: 0.0,
-        data: AppUsageData::default(),
         update_status: UpdateStatus::Idle,
         update_release: None,
-        last_balloon_shown_at: None,
-        auth_watch_mode: poller::CredentialWatchMode::ActiveSource,
-        auth_watch_snapshot: Vec::new(),
-        auth_error_paused_polling: false,
+        last_balloon_at: None,
     });
 
     create_initial_bubbles();
     refresh_tray_icons();
 
-    // Timers
+    let poll_interval = lock_state()
+        .as_ref()
+        .map(|s| s.settings.poll_interval_ms)
+        .unwrap_or(POLL_5_MIN);
     unsafe {
-        let interval = current_poll_interval_ms();
-        SetTimer(msg_hwnd, TIMER_POLL, interval, None);
+        SetTimer(msg_hwnd, TIMER_POLL, poll_interval, None);
     }
     schedule_update_check_timer(msg_hwnd);
     spawn_poll_thread();
 
-    diagnose::log("app::run entered message loop");
+    log::info!("app::run entered message loop");
     let mut msg = MSG::default();
     unsafe {
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
@@ -232,11 +204,10 @@ pub fn run() {
     }
 }
 
-// ---------- Window creation ----------
-
 fn create_message_window() -> Option<HWND> {
+    let class_w = os::to_utf16_nul(APP_CLASS_NAME);
+    let title_w = os::to_utf16_nul("Claude Code Usage Bubble");
     unsafe {
-        let class_w = wide_str(APP_CLASS_NAME);
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -246,8 +217,7 @@ fn create_message_window() -> Option<HWND> {
             ..Default::default()
         };
         let _ = RegisterClassExW(&wc);
-        let title_w = wide_str("Claude Code Usage Bubble");
-        let hwnd = CreateWindowExW(
+        CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             PCWSTR::from_raw(class_w.as_ptr()),
             PCWSTR::from_raw(title_w.as_ptr()),
@@ -261,41 +231,34 @@ fn create_message_window() -> Option<HWND> {
             hinstance,
             None,
         )
-        .ok()?;
-        Some(hwnd)
+        .ok()
     }
 }
 
 fn create_initial_bubbles() {
-    let (settings, is_dark) = {
-        let s = lock_state();
-        let Some(s) = s.as_ref() else {
-            return;
-        };
-        (s.settings.clone(), s.is_dark)
+    let (settings, is_dark) = match lock_state().as_ref() {
+        Some(s) => (s.settings.clone(), s.is_dark),
+        None => return,
     };
-
-    let mut to_create: Vec<(TrayIconKind, Option<(i32, i32)>)> = Vec::new();
     if settings.show_claude_code {
-        to_create.push((TrayIconKind::Claude, settings.bubble_positions.get(TrayIconKind::Claude)));
+        spawn_bubble(ProviderId::Claude, &settings, is_dark);
     }
     if settings.show_codex {
-        to_create.push((TrayIconKind::Codex, settings.bubble_positions.get(TrayIconKind::Codex)));
+        spawn_bubble(ProviderId::ChatGpt, &settings, is_dark);
     }
+}
 
-    for (model, pos) in to_create {
-        let hwnd = bubble::create(bubble::BubbleConfig {
-            model,
-            size_logical: settings.bubble_size_logical,
-            position: pos,
-            percent: None,
-            is_dark,
-        });
-        if hwnd != HWND::default() {
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.bubbles.insert(model.into(), SendHwnd::from_hwnd(hwnd));
-            }
+fn spawn_bubble(kind: TrayIconKind, settings: &Settings, is_dark: bool) {
+    let hwnd = bubble::create(bubble::BubbleConfig {
+        model: kind,
+        size_logical: settings.bubble_size_logical,
+        position: settings.bubble_positions.get(kind),
+        percent: None,
+        is_dark,
+    });
+    if hwnd != HWND::default() {
+        if let Some(s) = lock_state().as_mut() {
+            s.bubbles.insert(kind, SendHwnd::from_hwnd(hwnd));
         }
     }
 }
@@ -310,11 +273,11 @@ unsafe extern "system" fn msg_wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_APP_USAGE_UPDATED => {
-            apply_usage_update();
+            propagate_to_ui();
             LRESULT(0)
         }
         WM_APP_TRAY => {
-            let action = tray_icon::handle_message(lparam);
+            let action = tray::callback::handle(lparam);
             handle_tray_action(action);
             LRESULT(0)
         }
@@ -330,10 +293,9 @@ unsafe extern "system" fn msg_wnd_proc(
     }
 }
 
-// ---------- Bubble UI callbacks (called from bubble::wnd_proc) ----------
+// ---------- Bubble callbacks ----------
 
 pub fn on_bubble_click(hwnd: HWND, model: TrayIconKind) {
-    // Toggle expanded panel for this model.
     let data = build_panel_data(model);
     panel::toggle(data, hwnd);
 }
@@ -344,8 +306,8 @@ pub fn on_bubble_right_click(hwnd: HWND, _model: TrayIconKind, _pt: POINT) {
 
 pub fn on_bubble_moved(model: TrayIconKind, pos: (i32, i32)) {
     let snap = {
-        let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
         s.settings.bubble_positions.set(model, pos);
@@ -356,8 +318,8 @@ pub fn on_bubble_moved(model: TrayIconKind, pos: (i32, i32)) {
 
 pub fn on_bubble_resized(_model: TrayIconKind, size_logical: i32) {
     let snap = {
-        let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
         s.settings.bubble_size_logical = size_logical;
@@ -366,199 +328,162 @@ pub fn on_bubble_resized(_model: TrayIconKind, size_logical: i32) {
     settings::save(&snap);
 }
 
-pub fn on_menu_command(id: u32, owner_hwnd: HWND) {
+pub fn on_menu_command(id: u32, _owner_hwnd: HWND) {
     let id = (id & 0xFFFF) as u16;
     match id {
         IDM_REFRESH => spawn_poll_thread(),
-        IDM_EXIT => unsafe {
-            PostQuitMessage(0);
-        },
+        IDM_EXIT => unsafe { PostQuitMessage(0) },
         IDM_FREQ_1MIN => set_poll_interval(POLL_1_MIN),
         IDM_FREQ_5MIN => set_poll_interval(POLL_5_MIN),
         IDM_FREQ_15MIN => set_poll_interval(POLL_15_MIN),
         IDM_FREQ_1HOUR => set_poll_interval(POLL_1_HOUR),
-        IDM_MODEL_CLAUDE_CODE => toggle_model(TrayIconKind::Claude),
-        IDM_MODEL_CODEX => toggle_model(TrayIconKind::Codex),
+        IDM_MODEL_CLAUDE => toggle_model(ProviderId::Claude),
+        IDM_MODEL_CHATGPT => toggle_model(ProviderId::ChatGpt),
         IDM_START_WITH_WINDOWS => toggle_startup(),
         IDM_RESET_POSITION => reset_positions(),
-        IDM_VERSION_ACTION => version_action(owner_hwnd),
+        IDM_VERSION_ACTION => version_action(),
         IDM_LANG_SYSTEM => set_language(None),
-        IDM_LANG_ENGLISH => set_language(Some(LanguageId::English)),
-        IDM_LANG_DUTCH => set_language(Some(LanguageId::Dutch)),
-        IDM_LANG_SPANISH => set_language(Some(LanguageId::Spanish)),
-        IDM_LANG_FRENCH => set_language(Some(LanguageId::French)),
-        IDM_LANG_GERMAN => set_language(Some(LanguageId::German)),
-        IDM_LANG_JAPANESE => set_language(Some(LanguageId::Japanese)),
-        IDM_LANG_KOREAN => set_language(Some(LanguageId::Korean)),
-        IDM_LANG_TRADITIONAL_CHINESE => set_language(Some(LanguageId::TraditionalChinese)),
-        tray_icon::IDM_TOGGLE_WIDGET => toggle_widget_visibility(),
+        x if x >= IDM_LANG_BASE => set_language_by_index((x - IDM_LANG_BASE) as usize),
+        tray::IDM_TOGGLE_WIDGET => toggle_widget_visibility(),
         _ => {}
     }
 }
 
-// ---------- Timer dispatch ----------
+// ---------- Timers ----------
 
 fn on_timer(hwnd: HWND, id: usize) {
     match id {
-        TIMER_POLL => spawn_poll_thread(),
-        TIMER_RESET_POLL => spawn_poll_thread(),
+        TIMER_POLL | TIMER_RESET_POLL => spawn_poll_thread(),
         TIMER_COUNTDOWN => refresh_countdowns(),
         TIMER_UPDATE_CHECK => {
             unsafe {
                 let _ = KillTimer(hwnd, TIMER_UPDATE_CHECK);
             }
-            begin_update_check(hwnd, false);
+            begin_update_check(hwnd);
         }
         _ => {}
     }
 }
 
-// ---------- Poll thread / data application ----------
+// ---------- Poll thread ----------
 
 fn spawn_poll_thread() {
-    let (show_claude, show_codex, msg_hwnd) = {
-        let state = lock_state();
-        let Some(s) = state.as_ref() else {
-            return;
-        };
-        (
-            s.settings.show_claude_code,
-            s.settings.show_codex,
-            s.msg_hwnd,
-        )
+    let msg_hwnd = match lock_state().as_ref() {
+        Some(s) => s.msg_hwnd,
+        None => return,
     };
     std::thread::spawn(move || {
-        let result = poller::poll(show_claude, show_codex);
-        handle_poll_result(result, msg_hwnd);
+        do_poll();
+        unsafe {
+            let _ = PostMessageW(
+                msg_hwnd.to_hwnd(),
+                WM_APP_USAGE_UPDATED,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
     });
 }
 
-fn handle_poll_result(result: Result<AppUsageData, PollError>, msg_hwnd: SendHwnd) {
-    match result {
-        Ok(data) => {
-            {
-                let mut state = lock_state();
-                if let Some(s) = state.as_mut() {
-                    apply_data(s, data);
-                    s.last_poll_ok = true;
-                    s.retry_count = 0;
-                    s.auth_error_paused_polling = false;
-                    s.auth_watch_mode = poller::CredentialWatchMode::ActiveSource;
-                    s.auth_watch_snapshot.clear();
-                }
-            }
-            unsafe {
-                let _ = PostMessageW(
-                    msg_hwnd.to_hwnd(),
-                    WM_APP_USAGE_UPDATED,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
-        }
-        Err(error) => {
-            let auth_problem = matches!(
-                error,
-                PollError::AuthRequired | PollError::TokenExpired | PollError::NoCredentials
-            );
-            {
-                let mut state = lock_state();
-                if let Some(s) = state.as_mut() {
-                    s.last_poll_ok = false;
-                    s.retry_count = s.retry_count.saturating_add(1);
-                    if auth_problem {
-                        let mode = if matches!(error, PollError::NoCredentials) {
-                            poller::CredentialWatchMode::AllSources
-                        } else {
-                            poller::CredentialWatchMode::ActiveSource
-                        };
-                        s.auth_watch_mode = mode;
-                        s.auth_watch_snapshot = poller::credential_watch_snapshot(mode);
-                        s.auth_error_paused_polling = true;
-                        s.session_text = "!".into();
-                        s.weekly_text = "!".into();
-                        s.codex_session_text = "!".into();
-                        s.codex_weekly_text = "!".into();
-                    } else {
-                        s.session_text = "...".into();
-                        s.weekly_text = "...".into();
-                        s.codex_session_text = "...".into();
-                        s.codex_weekly_text = "...".into();
-                    }
-                }
-            }
-            unsafe {
-                let _ = PostMessageW(
-                    msg_hwnd.to_hwnd(),
-                    WM_APP_USAGE_UPDATED,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
-            if auth_problem {
-                show_token_expired_balloon();
-            }
-        }
+fn do_poll() {
+    let results = {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
+            return;
+        };
+        let settings = s.settings.clone();
+        s.registry.poll_enabled(&s.http, &settings)
+    };
+    let auth_failures = apply_results(results);
+    if !auth_failures.is_empty() {
+        attempt_refresh(auth_failures);
     }
 }
 
-fn apply_data(s: &mut AppState, data: AppUsageData) {
-    if let Some(c) = data.claude_code.as_ref() {
-        s.session_percent = c.session.percentage;
-        s.weekly_percent = c.weekly.percentage;
-    } else if s.settings.show_claude_code {
-        s.session_percent = 0.0;
-        s.weekly_percent = 0.0;
+fn apply_results(
+    results: Vec<(ProviderId, Result<UsageWindows, usage::Error>)>,
+) -> Vec<ProviderId> {
+    let mut auth_failures = Vec::new();
+    let mut s = lock_state();
+    let Some(s) = s.as_mut() else {
+        return auth_failures;
+    };
+    if results.is_empty() {
+        return auth_failures;
     }
-    if let Some(c) = data.codex.as_ref() {
-        s.codex_session_percent = c.session.percentage;
-        s.codex_weekly_percent = c.weekly.percentage;
-    } else if s.settings.show_codex {
-        s.codex_session_percent = 0.0;
-        s.codex_weekly_percent = 0.0;
+    let strings = s.i18n.strings().clone();
+    let mut any_ok = false;
+    for (id, outcome) in results {
+        match outcome {
+            Ok(windows) => {
+                let entry = s.snapshots.entry(id).or_default();
+                entry.windows = windows;
+                entry.primary_text = i18n::format_window(&windows.primary, &strings);
+                entry.secondary_text = i18n::format_window(&windows.secondary, &strings);
+                any_ok = true;
+            }
+            Err(usage::Error::AuthRequired | usage::Error::TokenExpired) => {
+                auth_failures.push(id);
+                let entry = s.snapshots.entry(id).or_default();
+                entry.primary_text = "!".into();
+                entry.secondary_text = "!".into();
+            }
+            Err(e) => {
+                log::warn!("provider {id:?} poll failed: {e}");
+                let entry = s.snapshots.entry(id).or_default();
+                entry.primary_text = "…".into();
+                entry.secondary_text = "…".into();
+            }
+        }
     }
-    s.data = data;
-    refresh_text_fields(s);
+    s.last_poll_ok = any_ok;
+    auth_failures
 }
 
-fn refresh_text_fields(s: &mut AppState) {
-    let strings = s.language.strings();
-    if let Some(c) = s.data.claude_code.as_ref() {
-        s.session_text = poller::format_line(&c.session, strings);
-        s.weekly_text = poller::format_line(&c.weekly, strings);
+fn attempt_refresh(failures: Vec<ProviderId>) {
+    let orchestrator = usage::refresh::Orchestrator::new(REFRESH_TIMEOUT);
+    let mut needs_balloon = false;
+    for id in failures {
+        let outcome = match lock_state().as_ref() {
+            Some(s) => s.registry.try_refresh(id, &orchestrator),
+            None => return,
+        };
+        log::info!("refresh for {id:?}: {outcome:?}");
+        if !matches!(outcome, usage::refresh::Outcome::Refreshed) {
+            needs_balloon = true;
+        }
     }
-    if let Some(c) = s.data.codex.as_ref() {
-        s.codex_session_text = poller::format_line(&c.session, strings);
-        s.codex_weekly_text = poller::format_line(&c.weekly, strings);
+    if needs_balloon {
+        show_token_expired_balloon();
     }
 }
 
 fn refresh_countdowns() {
     {
-        let mut state = lock_state();
-        if let Some(s) = state.as_mut() {
-            refresh_text_fields(s);
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
+            return;
+        };
+        let strings = s.i18n.strings().clone();
+        for entry in s.snapshots.values_mut() {
+            entry.primary_text = i18n::format_window(&entry.windows.primary, &strings);
+            entry.secondary_text = i18n::format_window(&entry.windows.secondary, &strings);
         }
     }
-    apply_usage_update();
+    propagate_to_ui();
 }
 
-fn apply_usage_update() {
+fn propagate_to_ui() {
     let snapshot = {
         let s = lock_state();
-        s.as_ref().map(|s| UsageSnapshot {
+        s.as_ref().map(|s| UiSnapshot {
             bubbles: s.bubbles.clone(),
-            session_percent: s.session_percent,
-            weekly_percent: s.weekly_percent,
-            codex_session_percent: s.codex_session_percent,
-            codex_weekly_percent: s.codex_weekly_percent,
-            session_text: s.session_text.clone(),
-            weekly_text: s.weekly_text.clone(),
-            codex_session_text: s.codex_session_text.clone(),
-            codex_weekly_text: s.codex_weekly_text.clone(),
-            language: s.language,
-            is_dark: s.is_dark,
+            snapshots: s.snapshots.clone(),
             settings: s.settings.clone(),
+            i18n_strings: s.i18n.strings().clone(),
+            is_dark: s.is_dark,
+            msg_hwnd: s.msg_hwnd,
+            last_poll_ok: s.last_poll_ok,
         })
     };
     let Some(snap) = snapshot else {
@@ -566,141 +491,102 @@ fn apply_usage_update() {
     };
 
     for (kind, hwnd) in snap.bubbles.iter() {
-        let model = TrayIconKind::from(*kind);
-        let pct = match model {
-            TrayIconKind::Claude => Some(snap.session_percent),
-            TrayIconKind::Codex => Some(snap.codex_session_percent),
-        };
+        let id = kind_to_provider(*kind);
+        let pct = snap
+            .snapshots
+            .get(&id)
+            .map(|s| s.windows.primary.utilization);
         bubble::update_percentage(hwnd.to_hwnd(), pct);
     }
+    refresh_tray_icons_with(&snap);
 
-    refresh_tray_icons();
-
-    // Refresh expanded panel if showing.
     if panel::is_visible() {
         if let Some(model) = panel::current_model() {
-            panel::refresh_data(build_panel_data_from(&snap, model));
+            let id = kind_to_provider(model);
+            if let Some(provider_state) = snap.snapshots.get(&id) {
+                panel::refresh_data(build_panel_data_from(&snap, model, provider_state));
+            }
         }
     }
-
-    // Adaptive countdown timer.
-    schedule_countdown_timer();
+    schedule_countdown_timer(&snap);
 }
 
 #[derive(Clone)]
-struct UsageSnapshot {
-    bubbles: HashMap<TrayIconKindKey, SendHwnd>,
-    session_percent: f64,
-    weekly_percent: f64,
-    codex_session_percent: f64,
-    codex_weekly_percent: f64,
-    session_text: String,
-    weekly_text: String,
-    codex_session_text: String,
-    codex_weekly_text: String,
-    language: LanguageId,
-    is_dark: bool,
+struct UiSnapshot {
+    bubbles: HashMap<TrayIconKind, SendHwnd>,
+    snapshots: HashMap<ProviderId, ProviderUiState>,
     settings: Settings,
+    i18n_strings: LocaleStrings,
+    is_dark: bool,
+    msg_hwnd: SendHwnd,
+    last_poll_ok: bool,
+}
+
+fn kind_to_provider(k: TrayIconKind) -> ProviderId {
+    match k {
+        ProviderId::Claude => ProviderId::Claude,
+        ProviderId::ChatGpt => ProviderId::ChatGpt,
+    }
 }
 
 fn build_panel_data(model: TrayIconKind) -> PanelData {
-    let snap = {
-        let s = lock_state();
-        s.as_ref().map(|s| UsageSnapshot {
-            bubbles: s.bubbles.clone(),
-            session_percent: s.session_percent,
-            weekly_percent: s.weekly_percent,
-            codex_session_percent: s.codex_session_percent,
-            codex_weekly_percent: s.codex_weekly_percent,
-            session_text: s.session_text.clone(),
-            weekly_text: s.weekly_text.clone(),
-            codex_session_text: s.codex_session_text.clone(),
-            codex_weekly_text: s.codex_weekly_text.clone(),
-            language: s.language,
-            is_dark: s.is_dark,
-            settings: s.settings.clone(),
-        })
-    }
-    .unwrap_or_else(|| UsageSnapshot {
-        bubbles: HashMap::new(),
-        session_percent: 0.0,
-        weekly_percent: 0.0,
-        codex_session_percent: 0.0,
-        codex_weekly_percent: 0.0,
-        session_text: String::new(),
-        weekly_text: String::new(),
-        codex_session_text: String::new(),
-        codex_weekly_text: String::new(),
-        language: LanguageId::English,
-        is_dark: false,
-        settings: Settings::default(),
-    });
-    build_panel_data_from(&snap, model)
-}
-
-fn build_panel_data_from(snap: &UsageSnapshot, model: TrayIconKind) -> PanelData {
-    let (sp, st, wp, wt) = match model {
-        TrayIconKind::Claude => (
-            snap.session_percent,
-            snap.session_text.clone(),
-            snap.weekly_percent,
-            snap.weekly_text.clone(),
-        ),
-        TrayIconKind::Codex => (
-            snap.codex_session_percent,
-            snap.codex_session_text.clone(),
-            snap.codex_weekly_percent,
-            snap.codex_weekly_text.clone(),
-        ),
+    let s = lock_state();
+    let Some(s) = s.as_ref() else {
+        return placeholder_panel(model);
     };
-    let strings = snap.language.strings();
+    let id = kind_to_provider(model);
+    let strings = s.i18n.strings().clone();
+    let provider_state = s.snapshots.get(&id).cloned().unwrap_or_default();
     PanelData {
         model,
-        session_pct: sp,
-        session_text: st,
-        weekly_pct: wp,
-        weekly_text: wt,
-        is_dark: snap.is_dark,
+        session_pct: provider_state.windows.primary.utilization,
+        session_text: provider_state.primary_text,
+        weekly_pct: provider_state.windows.secondary.utilization,
+        weekly_text: provider_state.secondary_text,
+        is_dark: s.is_dark,
         strings,
-        claude_label: strings.claude_code_model.to_string(),
-        codex_label: strings.codex_model.to_string(),
     }
 }
 
-fn schedule_countdown_timer() {
-    let (msg_hwnd, ttl) = {
-        let s = lock_state();
-        let Some(s) = s.as_ref() else {
-            return;
-        };
-        let mut min_ttl: Option<Duration> = None;
-        if let Some(c) = s.data.claude_code.as_ref() {
-            for section in [&c.session, &c.weekly] {
-                if let Some(d) = poller::time_until_display_change(section.resets_at) {
-                    min_ttl = Some(match min_ttl {
-                        Some(prev) => prev.min(d),
-                        None => d,
-                    });
-                }
+fn build_panel_data_from(snap: &UiSnapshot, model: TrayIconKind, p: &ProviderUiState) -> PanelData {
+    PanelData {
+        model,
+        session_pct: p.windows.primary.utilization,
+        session_text: p.primary_text.clone(),
+        weekly_pct: p.windows.secondary.utilization,
+        weekly_text: p.secondary_text.clone(),
+        is_dark: snap.is_dark,
+        strings: snap.i18n_strings.clone(),
+    }
+}
+
+fn placeholder_panel(model: TrayIconKind) -> PanelData {
+    let strings = i18n::I18n::load(None).strings().clone();
+    PanelData {
+        model,
+        session_pct: 0.0,
+        session_text: String::new(),
+        weekly_pct: 0.0,
+        weekly_text: String::new(),
+        is_dark: false,
+        strings,
+    }
+}
+
+fn schedule_countdown_timer(snap: &UiSnapshot) {
+    let mut min_ttl: Option<Duration> = None;
+    for entry in snap.snapshots.values() {
+        for w in [&entry.windows.primary, &entry.windows.secondary] {
+            if let Some(d) = i18n::time_until_display_change(w.resets_at) {
+                min_ttl = Some(min_ttl.map_or(d, |prev| prev.min(d)));
             }
         }
-        if let Some(c) = s.data.codex.as_ref() {
-            for section in [&c.session, &c.weekly] {
-                if let Some(d) = poller::time_until_display_change(section.resets_at) {
-                    min_ttl = Some(match min_ttl {
-                        Some(prev) => prev.min(d),
-                        None => d,
-                    });
-                }
-            }
-        }
-        (s.msg_hwnd, min_ttl)
-    };
-    if let Some(d) = ttl {
-        let ms = (d.as_millis() as u64).min(u32::MAX as u64) as u32;
+    }
+    if let Some(d) = min_ttl {
+        let ms = (d.as_millis().min(u32::MAX as u128) as u32).max(1_000);
         unsafe {
-            let _ = KillTimer(msg_hwnd.to_hwnd(), TIMER_COUNTDOWN);
-            SetTimer(msg_hwnd.to_hwnd(), TIMER_COUNTDOWN, ms.max(1000), None);
+            let _ = KillTimer(snap.msg_hwnd.to_hwnd(), TIMER_COUNTDOWN);
+            SetTimer(snap.msg_hwnd.to_hwnd(), TIMER_COUNTDOWN, ms, None);
         }
     }
 }
@@ -708,44 +594,64 @@ fn schedule_countdown_timer() {
 // ---------- Tray icons ----------
 
 fn refresh_tray_icons() {
-    let (icons, msg_hwnd) = {
+    let snap = {
         let s = lock_state();
-        let Some(s) = s.as_ref() else {
-            return;
-        };
-        let strings = s.language.strings();
-        let mut icons = Vec::new();
-        if s.settings.show_claude_code {
-            icons.push(TrayIconData {
-                kind: TrayIconKind::Claude,
-                percent: if s.last_poll_ok {
-                    Some(s.session_percent)
-                } else {
-                    None
-                },
-                tooltip: format!(
-                    "{} 5h: {} | 7d: {}",
-                    strings.claude_code_model, s.session_text, s.weekly_text
-                ),
-            });
-        }
-        if s.settings.show_codex {
-            icons.push(TrayIconData {
-                kind: TrayIconKind::Codex,
-                percent: if s.last_poll_ok {
-                    Some(s.codex_session_percent)
-                } else {
-                    None
-                },
-                tooltip: format!(
-                    "{} 5h: {} | 7d: {}",
-                    strings.codex_model, s.codex_session_text, s.codex_weekly_text
-                ),
-            });
-        }
-        (icons, s.msg_hwnd)
+        s.as_ref().map(|s| UiSnapshot {
+            bubbles: s.bubbles.clone(),
+            snapshots: s.snapshots.clone(),
+            settings: s.settings.clone(),
+            i18n_strings: s.i18n.strings().clone(),
+            is_dark: s.is_dark,
+            msg_hwnd: s.msg_hwnd,
+            last_poll_ok: s.last_poll_ok,
+        })
     };
-    tray_icon::sync(msg_hwnd.to_hwnd(), &icons);
+    if let Some(snap) = snap {
+        refresh_tray_icons_with(&snap);
+    }
+}
+
+fn refresh_tray_icons_with(snap: &UiSnapshot) {
+    let mut icons = Vec::new();
+    if snap.settings.show_claude_code {
+        let entry = snap.snapshots.get(&ProviderId::Claude);
+        icons.push(TrayIconData {
+            kind: ProviderId::Claude,
+            percent: if snap.last_poll_ok {
+                entry.map(|e| e.windows.primary.utilization)
+            } else {
+                None
+            },
+            tooltip: format!(
+                "{} {}: {} | {}: {}",
+                snap.i18n_strings.claude_label,
+                snap.i18n_strings.session_window,
+                entry.map(|e| e.primary_text.as_str()).unwrap_or(""),
+                snap.i18n_strings.weekly_window,
+                entry.map(|e| e.secondary_text.as_str()).unwrap_or(""),
+            ),
+        });
+    }
+    if snap.settings.show_codex {
+        let entry = snap.snapshots.get(&ProviderId::ChatGpt);
+        icons.push(TrayIconData {
+            kind: ProviderId::ChatGpt,
+            percent: if snap.last_poll_ok {
+                entry.map(|e| e.windows.primary.utilization)
+            } else {
+                None
+            },
+            tooltip: format!(
+                "{} {}: {} | {}: {}",
+                snap.i18n_strings.chatgpt_label,
+                snap.i18n_strings.session_window,
+                entry.map(|e| e.primary_text.as_str()).unwrap_or(""),
+                snap.i18n_strings.weekly_window,
+                entry.map(|e| e.secondary_text.as_str()).unwrap_or(""),
+            ),
+        });
+    }
+    tray::sync(snap.msg_hwnd.to_hwnd(), &icons);
 }
 
 fn handle_tray_action(action: TrayAction) {
@@ -753,14 +659,11 @@ fn handle_tray_action(action: TrayAction) {
         TrayAction::None => {}
         TrayAction::ToggleWidget => toggle_widget_visibility(),
         TrayAction::ShowContextMenu => {
-            // Use the first bubble as menu owner; fall back to msg_hwnd.
-            let owner = {
-                let s = lock_state();
-                s.as_ref()
-                    .and_then(|s| s.bubbles.values().next().copied())
-                    .map(|h| h.to_hwnd())
-                    .unwrap_or_default()
-            };
+            let owner = lock_state()
+                .as_ref()
+                .and_then(|s| s.bubbles.values().next().copied())
+                .map(|h| h.to_hwnd())
+                .unwrap_or_default();
             if owner != HWND::default() {
                 show_context_menu(owner);
             }
@@ -769,58 +672,68 @@ fn handle_tray_action(action: TrayAction) {
 }
 
 fn show_token_expired_balloon() {
-    let payload: Option<(SendHwnd, TrayIconKind, String, String)> = {
-        let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
+    let payload = {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
-        if let Some(last) = s.last_balloon_shown_at {
-            if last.elapsed() < Duration::from_secs(30 * 60) {
+        if let Some(last) = s.last_balloon_at {
+            if last.elapsed() < BALLOON_COOLDOWN {
                 return;
             }
         }
-        s.last_balloon_shown_at = Some(Instant::now());
-        let strings = s.language.strings();
-        if s.settings.show_claude_code {
-            Some((
-                s.msg_hwnd,
-                TrayIconKind::Claude,
-                strings.token_expired_title.to_string(),
-                strings.token_expired_body.to_string(),
-            ))
+        s.last_balloon_at = Some(Instant::now());
+        let strings = s.i18n.strings();
+        let (kind, title, body) = if s.settings.show_claude_code {
+            (
+                ProviderId::Claude,
+                strings.token_expired_title.clone(),
+                strings.token_expired_body.clone(),
+            )
         } else {
-            Some((
-                s.msg_hwnd,
-                TrayIconKind::Codex,
-                strings.codex_token_expired_title.to_string(),
-                strings.codex_token_expired_body.to_string(),
-            ))
-        }
+            (
+                ProviderId::ChatGpt,
+                strings.chatgpt_token_expired_title.clone(),
+                strings.chatgpt_token_expired_body.clone(),
+            )
+        };
+        (s.msg_hwnd, kind, title, body)
     };
-    if let Some((hwnd, kind, title, body)) = payload {
-        tray_icon::notify_balloon(hwnd.to_hwnd(), kind, &title, &body);
-    }
+    tray::notify(payload.0.to_hwnd(), payload.1, &payload.2, &payload.3);
 }
 
 // ---------- Context menu ----------
 
+struct ContextMenuSnapshot {
+    strings: LocaleStrings,
+    available: Vec<(String, String)>,
+    language_override: Option<String>,
+    current_interval: u32,
+    show_claude: bool,
+    show_chatgpt: bool,
+    widget_visible: bool,
+    install_channel: InstallChannel,
+    update_status: UpdateStatus,
+}
+
 fn show_context_menu(owner_hwnd: HWND) {
-    let (strings, language, install_channel, update_status, current_interval, show_claude, show_codex, widget_visible, language_override) = {
-        let s = lock_state();
-        let Some(s) = s.as_ref() else {
-            return;
-        };
-        (
-            s.language.strings(),
-            s.language,
-            s.install_channel,
-            s.update_status,
-            s.settings.poll_interval_ms,
-            s.settings.show_claude_code,
-            s.settings.show_codex,
-            s.settings.widget_visible,
-            s.settings.language.as_deref().and_then(LanguageId::from_code),
-        )
+    let snap = match lock_state().as_ref() {
+        Some(s) => ContextMenuSnapshot {
+            strings: s.i18n.strings().clone(),
+            available: s
+                .i18n
+                .available()
+                .map(|(c, n)| (c.to_string(), n.to_string()))
+                .collect(),
+            language_override: s.settings.language.clone(),
+            current_interval: s.settings.poll_interval_ms,
+            show_claude: s.settings.show_claude_code,
+            show_chatgpt: s.settings.show_codex,
+            widget_visible: s.settings.widget_visible,
+            install_channel: s.install_channel,
+            update_status: s.update_status,
+        },
+        None => return,
     };
 
     unsafe {
@@ -829,122 +742,97 @@ fn show_context_menu(owner_hwnd: HWND) {
             Err(_) => return,
         };
 
-        append_menu_item(menu, IDM_REFRESH, strings.refresh, MENU_ITEM_FLAGS(0));
+        append_item(menu, IDM_REFRESH, &snap.strings.refresh, MENU_ITEM_FLAGS(0));
 
-        // Update frequency submenu
-        let freq_menu = CreatePopupMenu().unwrap();
+        let freq = CreatePopupMenu().unwrap();
         for (id, interval, label) in [
-            (IDM_FREQ_1MIN, POLL_1_MIN, strings.one_minute),
-            (IDM_FREQ_5MIN, POLL_5_MIN, strings.five_minutes),
-            (IDM_FREQ_15MIN, POLL_15_MIN, strings.fifteen_minutes),
-            (IDM_FREQ_1HOUR, POLL_1_HOUR, strings.one_hour),
+            (IDM_FREQ_1MIN, POLL_1_MIN, &snap.strings.one_minute),
+            (IDM_FREQ_5MIN, POLL_5_MIN, &snap.strings.five_minutes),
+            (IDM_FREQ_15MIN, POLL_15_MIN, &snap.strings.fifteen_minutes),
+            (IDM_FREQ_1HOUR, POLL_1_HOUR, &snap.strings.one_hour),
         ] {
-            let flags = if interval == current_interval {
+            let flags = if interval == snap.current_interval {
                 MF_CHECKED
             } else {
                 MENU_ITEM_FLAGS(0)
             };
-            append_menu_item(freq_menu, id, label, flags);
+            append_item(freq, id, label, flags);
         }
-        append_submenu(menu, freq_menu, strings.update_frequency);
+        append_submenu(menu, freq, &snap.strings.update_frequency);
 
-        // Models submenu
-        let models_menu = CreatePopupMenu().unwrap();
-        append_menu_item(
-            models_menu,
-            IDM_MODEL_CLAUDE_CODE,
-            strings.claude_code_model,
-            if show_claude {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            },
+        let models = CreatePopupMenu().unwrap();
+        append_item(
+            models,
+            IDM_MODEL_CLAUDE,
+            &snap.strings.claude_label,
+            if snap.show_claude { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
         );
-        append_menu_item(
-            models_menu,
-            IDM_MODEL_CODEX,
-            strings.codex_model,
-            if show_codex {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            },
+        append_item(
+            models,
+            IDM_MODEL_CHATGPT,
+            &snap.strings.chatgpt_label,
+            if snap.show_chatgpt { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
         );
-        append_submenu(menu, models_menu, strings.models);
+        append_submenu(menu, models, &snap.strings.models);
 
-        // Settings submenu
         let settings_menu = CreatePopupMenu().unwrap();
-        append_menu_item(
+        append_item(
             settings_menu,
             IDM_START_WITH_WINDOWS,
-            strings.start_with_windows,
-            if is_startup_enabled() {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            },
+            &snap.strings.start_with_windows,
+            if is_startup_enabled() { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
         );
-        append_menu_item(
+        append_item(
             settings_menu,
             IDM_RESET_POSITION,
-            strings.reset_position,
+            &snap.strings.reset_position,
             MENU_ITEM_FLAGS(0),
         );
 
-        // Language submenu
-        let lang_menu = CreatePopupMenu().unwrap();
-        append_menu_item(
-            lang_menu,
+        let lang = CreatePopupMenu().unwrap();
+        append_item(
+            lang,
             IDM_LANG_SYSTEM,
-            strings.system_default,
-            if language_override.is_none() {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            },
+            &snap.strings.system_default,
+            if snap.language_override.is_none() { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
         );
-        for lang in LanguageId::ALL {
-            let id = lang_menu_id_for(lang);
-            let label = lang.native_name();
-            let flags = if language_override == Some(lang) {
+        for (i, (code, name)) in snap.available.iter().enumerate() {
+            let id = IDM_LANG_BASE + i as u16;
+            let flags = if snap
+                .language_override
+                .as_deref()
+                .map(|c| c == code)
+                .unwrap_or(false)
+            {
                 MF_CHECKED
             } else {
                 MENU_ITEM_FLAGS(0)
             };
-            append_menu_item(lang_menu, id, label, flags);
+            append_item(lang, id, name, flags);
         }
-        append_submenu(settings_menu, lang_menu, strings.language);
-
+        append_submenu(settings_menu, lang, &snap.strings.language);
         let _ = AppendMenuW(settings_menu, MF_SEPARATOR, 0, PCWSTR::null());
 
-        let version_label = version_action_label(strings, language, install_channel, update_status);
-        let version_flags = if matches!(update_status, UpdateStatus::Checking | UpdateStatus::Applying) {
+        let version_label = version_action_label(&snap);
+        let version_flags = if matches!(
+            snap.update_status,
+            UpdateStatus::Checking | UpdateStatus::Applying
+        ) {
             MF_GRAYED
         } else {
             MENU_ITEM_FLAGS(0)
         };
-        append_menu_item(
-            settings_menu,
-            IDM_VERSION_ACTION,
-            &version_label,
-            version_flags,
-        );
+        append_item(settings_menu, IDM_VERSION_ACTION, &version_label, version_flags);
+        append_submenu(menu, settings_menu, &snap.strings.settings);
 
-        append_submenu(menu, settings_menu, strings.settings);
-
-        append_menu_item(
+        append_item(
             menu,
-            tray_icon::IDM_TOGGLE_WIDGET,
-            strings.show_widget,
-            if widget_visible {
-                MF_CHECKED
-            } else {
-                MENU_ITEM_FLAGS(0)
-            },
+            tray::IDM_TOGGLE_WIDGET,
+            &snap.strings.show_widget,
+            if snap.widget_visible { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
         );
-
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        append_menu_item(menu, IDM_EXIT, strings.exit, MENU_ITEM_FLAGS(0));
+        append_item(menu, IDM_EXIT, &snap.strings.exit, MENU_ITEM_FLAGS(0));
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
@@ -954,54 +842,31 @@ fn show_context_menu(owner_hwnd: HWND) {
     }
 }
 
-fn append_menu_item(menu: HMENU, id: u16, label: &str, flags: MENU_ITEM_FLAGS) {
-    let label_w = wide_str(label);
+fn append_item(menu: HMENU, id: u16, label: &str, flags: MENU_ITEM_FLAGS) {
+    let w = os::to_utf16_nul(label);
     unsafe {
-        let _ = AppendMenuW(menu, flags, id as usize, PCWSTR::from_raw(label_w.as_ptr()));
+        let _ = AppendMenuW(menu, flags, id as usize, PCWSTR::from_raw(w.as_ptr()));
     }
 }
 
 fn append_submenu(menu: HMENU, submenu: HMENU, label: &str) {
-    let label_w = wide_str(label);
+    let w = os::to_utf16_nul(label);
     unsafe {
-        let _ = AppendMenuW(
-            menu,
-            MF_POPUP,
-            submenu.0 as usize,
-            PCWSTR::from_raw(label_w.as_ptr()),
-        );
+        let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR::from_raw(w.as_ptr()));
     }
 }
 
-fn lang_menu_id_for(lang: LanguageId) -> u16 {
-    match lang {
-        LanguageId::English => IDM_LANG_ENGLISH,
-        LanguageId::Dutch => IDM_LANG_DUTCH,
-        LanguageId::Spanish => IDM_LANG_SPANISH,
-        LanguageId::French => IDM_LANG_FRENCH,
-        LanguageId::German => IDM_LANG_GERMAN,
-        LanguageId::Japanese => IDM_LANG_JAPANESE,
-        LanguageId::Korean => IDM_LANG_KOREAN,
-        LanguageId::TraditionalChinese => IDM_LANG_TRADITIONAL_CHINESE,
-    }
-}
-
-fn version_action_label(
-    strings: Strings,
-    language: LanguageId,
-    install_channel: InstallChannel,
-    status: UpdateStatus,
-) -> String {
-    let base = match status {
-        UpdateStatus::Idle => strings.check_for_updates.to_string(),
-        UpdateStatus::Checking => strings.checking_for_updates.to_string(),
-        UpdateStatus::UpToDate => strings.up_to_date.to_string(),
-        UpdateStatus::Available => strings.update_available.to_string(),
-        UpdateStatus::Applying => strings.applying_update.to_string(),
-        UpdateStatus::Failed => strings.update_failed.to_string(),
+fn version_action_label(snap: &ContextMenuSnapshot) -> String {
+    let base = match snap.update_status {
+        UpdateStatus::Idle => snap.strings.check_for_updates.clone(),
+        UpdateStatus::Checking => snap.strings.checking_for_updates.clone(),
+        UpdateStatus::UpToDate => snap.strings.up_to_date.clone(),
+        UpdateStatus::Available => snap.strings.update_available.clone(),
+        UpdateStatus::Applying => snap.strings.applying_update.clone(),
+        UpdateStatus::Failed => snap.strings.update_failed.clone(),
     };
-    match install_channel {
-        InstallChannel::Winget => format!("{base} ({})", localization::update_via_winget(language)),
+    match snap.install_channel {
+        InstallChannel::Winget => format!("{base} ({})", snap.strings.update_via_winget),
         InstallChannel::Portable => base,
     }
 }
@@ -1010,8 +875,8 @@ fn version_action_label(
 
 fn set_poll_interval(ms: u32) {
     let (snap, msg_hwnd) = {
-        let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
         s.settings.poll_interval_ms = ms;
@@ -1024,65 +889,37 @@ fn set_poll_interval(ms: u32) {
     }
 }
 
-fn current_poll_interval_ms() -> u32 {
-    lock_state()
-        .as_ref()
-        .map(|s| s.settings.poll_interval_ms)
-        .unwrap_or(POLL_5_MIN)
-}
-
 fn toggle_model(model: TrayIconKind) {
     let (settings, is_dark) = {
-        let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
         match model {
-            TrayIconKind::Claude => s.settings.show_claude_code = !s.settings.show_claude_code,
-            TrayIconKind::Codex => s.settings.show_codex = !s.settings.show_codex,
+            ProviderId::Claude => s.settings.show_claude_code = !s.settings.show_claude_code,
+            ProviderId::ChatGpt => s.settings.show_codex = !s.settings.show_codex,
         }
         if !s.settings.show_claude_code && !s.settings.show_codex {
-            // Don't let user turn both off.
             match model {
-                TrayIconKind::Claude => s.settings.show_claude_code = true,
-                TrayIconKind::Codex => s.settings.show_codex = true,
+                ProviderId::Claude => s.settings.show_claude_code = true,
+                ProviderId::ChatGpt => s.settings.show_codex = true,
             }
         }
         (s.settings.clone(), s.is_dark)
     };
     settings::save(&settings);
 
-    let want_show = match model {
-        TrayIconKind::Claude => settings.show_claude_code,
-        TrayIconKind::Codex => settings.show_codex,
+    let want = match model {
+        ProviderId::Claude => settings.show_claude_code,
+        ProviderId::ChatGpt => settings.show_codex,
     };
-    let existing = {
-        let s = lock_state();
-        s.as_ref()
-            .and_then(|s| s.bubbles.get(&model.into()).copied())
-    };
-
-    match (want_show, existing) {
-        (true, None) => {
-            let hwnd = bubble::create(bubble::BubbleConfig {
-                model,
-                size_logical: settings.bubble_size_logical,
-                position: settings.bubble_positions.get(model),
-                percent: None,
-                is_dark,
-            });
-            if hwnd != HWND::default() {
-                let mut state = lock_state();
-                if let Some(s) = state.as_mut() {
-                    s.bubbles.insert(model.into(), SendHwnd::from_hwnd(hwnd));
-                }
-            }
-        }
-        (false, Some(hwnd)) => {
-            bubble::destroy(hwnd.to_hwnd());
-            let mut state = lock_state();
-            if let Some(s) = state.as_mut() {
-                s.bubbles.remove(&model.into());
+    let existing = lock_state().as_ref().and_then(|s| s.bubbles.get(&model).copied());
+    match (want, existing) {
+        (true, None) => spawn_bubble(model, &settings, is_dark),
+        (false, Some(h)) => {
+            bubble::destroy(h.to_hwnd());
+            if let Some(s) = lock_state().as_mut() {
+                s.bubbles.remove(&model);
             }
         }
         _ => {}
@@ -1092,171 +929,168 @@ fn toggle_model(model: TrayIconKind) {
 }
 
 fn toggle_widget_visibility() {
-    let (new_visible, snap) = {
-        let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
+    let (visible, snap) = {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
         s.settings.widget_visible = !s.settings.widget_visible;
         (s.settings.widget_visible, s.settings.clone())
     };
     settings::save(&snap);
-    let hwnds: Vec<HWND> = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| s.bubbles.values().map(|h| h.to_hwnd()).collect())
-            .unwrap_or_default()
-    };
+    let hwnds: Vec<HWND> = lock_state()
+        .as_ref()
+        .map(|s| s.bubbles.values().map(|h| h.to_hwnd()).collect())
+        .unwrap_or_default();
     for h in hwnds {
-        bubble::set_user_visible(h, new_visible);
+        bubble::set_user_visible(h, visible);
     }
 }
 
 fn reset_positions() {
     let snap = {
-        let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
         s.settings.bubble_positions.reset_all();
         s.settings.clone()
     };
     settings::save(&snap);
-    let hwnds: Vec<HWND> = {
-        let state = lock_state();
-        state
-            .as_ref()
-            .map(|s| s.bubbles.values().map(|h| h.to_hwnd()).collect())
-            .unwrap_or_default()
-    };
+    let hwnds: Vec<HWND> = lock_state()
+        .as_ref()
+        .map(|s| s.bubbles.values().map(|h| h.to_hwnd()).collect())
+        .unwrap_or_default();
     for h in hwnds {
         bubble::destroy(h);
     }
-    {
-        let mut state = lock_state();
-        if let Some(s) = state.as_mut() {
-            s.bubbles.clear();
-        }
+    if let Some(s) = lock_state().as_mut() {
+        s.bubbles.clear();
     }
     create_initial_bubbles();
 }
 
-fn set_language(override_lang: Option<LanguageId>) {
+fn set_language(_dummy: Option<()>) {
     let snap = {
-        let mut state = lock_state();
-        let Some(s) = state.as_mut() else {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
-        s.language = match override_lang {
-            Some(l) => l,
-            None => localization::detect_system_language(),
-        };
-        s.settings.language = override_lang.map(|l| l.code().to_string());
-        refresh_text_fields(s);
+        s.i18n.set_active(None);
+        s.settings.language = None;
         s.settings.clone()
     };
     settings::save(&snap);
-    apply_usage_update();
+    propagate_to_ui();
 }
 
-fn version_action(_owner_hwnd: HWND) {
-    enum Act {
-        Apply(updater::ReleaseDescriptor, InstallChannel),
-        Check(SendHwnd),
-    }
-    let act = {
-        let s = lock_state();
-        let Some(s) = s.as_ref() else {
+fn set_language_by_index(idx: usize) {
+    let snap = {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
             return;
         };
-        match (s.update_status, s.update_release.as_ref()) {
-            (UpdateStatus::Available, Some(release)) => {
-                Act::Apply(release.clone(), s.install_channel)
-            }
-            _ => Act::Check(s.msg_hwnd),
+        let code = s.i18n.available().nth(idx).map(|(c, _)| c.to_string());
+        if let Some(c) = code.as_deref() {
+            s.i18n.set_active(Some(c));
         }
+        s.settings.language = code;
+        s.settings.clone()
+    };
+    settings::save(&snap);
+    propagate_to_ui();
+}
+
+fn version_action() {
+    enum Act {
+        Apply(update::Release, InstallChannel),
+        Check(SendHwnd),
+    }
+    let act = match lock_state().as_ref() {
+        Some(s) => match (s.update_status, s.update_release.as_ref()) {
+            (UpdateStatus::Available, Some(r)) => Act::Apply(r.clone(), s.install_channel),
+            _ => Act::Check(s.msg_hwnd),
+        },
+        None => return,
     };
     match act {
         Act::Apply(release, channel) => {
-            {
-                let mut state = lock_state();
-                if let Some(s) = state.as_mut() {
-                    s.update_status = UpdateStatus::Applying;
-                }
+            if let Some(s) = lock_state().as_mut() {
+                s.update_status = UpdateStatus::Applying;
             }
-            let result = match channel {
-                InstallChannel::Winget => updater::begin_winget_update(),
-                InstallChannel::Portable => updater::begin_self_update(&release),
+            let result: Result<(), Box<dyn std::error::Error>> = match channel {
+                InstallChannel::Winget => {
+                    // Winget channel is reserved for future use; until a
+                    // winget package ships, this branch is unreachable.
+                    Err("winget channel not supported yet".into())
+                }
+                InstallChannel::Portable => {
+                    match net::Client::new(HTTP_USER_AGENT) {
+                        Ok(c) => update::install::begin(&c, &release).map_err(|e| e.into()),
+                        Err(e) => Err(e.into()),
+                    }
+                }
             };
             match result {
-                Ok(()) => unsafe {
-                    PostQuitMessage(0);
-                },
-                Err(error) => {
-                    diagnose::log(format!("update apply failed: {error}"));
-                    let mut state = lock_state();
-                    if let Some(s) = state.as_mut() {
+                Ok(()) => unsafe { PostQuitMessage(0) },
+                Err(e) => {
+                    log::error!("update apply failed: {e}");
+                    if let Some(s) = lock_state().as_mut() {
                         s.update_status = UpdateStatus::Failed;
                     }
                 }
             }
         }
-        Act::Check(hwnd) => {
-            begin_update_check(hwnd.to_hwnd(), true);
-        }
+        Act::Check(hwnd) => begin_update_check(hwnd.to_hwnd()),
     }
 }
 
-// ---------- Updates ----------
-
 fn schedule_update_check_timer(hwnd: HWND) {
-    let last = {
-        let s = lock_state();
-        s.as_ref().and_then(|s| s.settings.last_update_check_unix)
-    };
+    let last = lock_state()
+        .as_ref()
+        .and_then(|s| s.settings.last_update_check_unix);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let due = last.map_or(true, |t| now.saturating_sub(t) >= UPDATE_CHECK_INTERVAL_SECS);
     if due {
-        begin_update_check(hwnd, false);
+        begin_update_check(hwnd);
     } else {
         let remaining = UPDATE_CHECK_INTERVAL_SECS.saturating_sub(now.saturating_sub(last.unwrap_or(0)));
-        let ms = (remaining.saturating_mul(1000)).min(u32::MAX as u64) as u32;
+        let ms = (remaining.saturating_mul(1000).min(u32::MAX as u64)) as u32;
         unsafe {
             SetTimer(hwnd, TIMER_UPDATE_CHECK, ms, None);
         }
     }
 }
 
-fn begin_update_check(hwnd: HWND, _user_initiated: bool) {
-    {
-        let mut state = lock_state();
-        if let Some(s) = state.as_mut() {
-            s.update_status = UpdateStatus::Checking;
-        }
+fn begin_update_check(hwnd: HWND) {
+    if let Some(s) = lock_state().as_mut() {
+        s.update_status = UpdateStatus::Checking;
     }
     let send_hwnd = SendHwnd::from_hwnd(hwnd);
     std::thread::spawn(move || {
-        let result = updater::check_for_updates();
+        let result = match net::Client::new(HTTP_USER_AGENT) {
+            Ok(c) => update::release::fetch_latest(&c),
+            Err(e) => Err(update::Error::Network(e)),
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let snap_opt: Option<Settings> = {
-            let mut state = lock_state();
-            state.as_mut().map(|s| {
+        let snap_opt = {
+            let mut s = lock_state();
+            s.as_mut().map(|s| {
                 s.settings.last_update_check_unix = Some(now);
                 match result {
-                    Ok(UpdateCheckResult::UpToDate) => {
+                    Ok(CheckOutcome::UpToDate) => {
                         s.update_status = UpdateStatus::UpToDate;
                         s.update_release = None;
                     }
-                    Ok(UpdateCheckResult::Available(release)) => {
+                    Ok(CheckOutcome::Available(r)) => {
                         s.update_status = UpdateStatus::Available;
-                        s.update_release = Some(release);
+                        s.update_release = Some(r);
                     }
                     Err(_) => {
                         s.update_status = UpdateStatus::Failed;
@@ -1279,76 +1113,17 @@ fn begin_update_check(hwnd: HWND, _user_initiated: bool) {
     });
 }
 
-// ---------- Start-with-Windows registry ----------
+// ---------- Start-with-Windows ----------
 
 fn is_startup_enabled() -> bool {
-    let path_w = wide_str(STARTUP_REGISTRY_PATH);
-    let name_w = wide_str(STARTUP_VALUE_NAME);
-    unsafe {
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR::from_raw(path_w.as_ptr()),
-            0,
-            KEY_READ,
-            &mut hkey,
-        )
-        .is_err()
-        {
-            return false;
-        }
-        let mut buf = [0u16; 1024];
-        let mut size = (buf.len() * 2) as u32;
-        let res = RegQueryValueExW(
-            hkey,
-            PCWSTR::from_raw(name_w.as_ptr()),
-            None,
-            None,
-            Some(buf.as_mut_ptr() as *mut u8),
-            Some(&mut size),
-        );
-        let _ = RegCloseKey(hkey);
-        res.is_ok()
-    }
+    os::registry::value_exists(STARTUP_REGISTRY_PATH, STARTUP_VALUE_NAME)
 }
 
 fn toggle_startup() {
-    let enabled = is_startup_enabled();
-    let path_w = wide_str(STARTUP_REGISTRY_PATH);
-    let name_w = wide_str(STARTUP_VALUE_NAME);
-    unsafe {
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            PCWSTR::from_raw(path_w.as_ptr()),
-            0,
-            KEY_WRITE,
-            &mut hkey,
-        )
-        .is_err()
-        {
-            return;
-        }
-        if enabled {
-            let _ = RegDeleteValueW(hkey, PCWSTR::from_raw(name_w.as_ptr()));
-        } else {
-            if let Ok(exe) = std::env::current_exe() {
-                let exe_str = format!("\"{}\"", exe.to_string_lossy());
-                let exe_w = wide_str(&exe_str);
-                let bytes = std::slice::from_raw_parts(
-                    exe_w.as_ptr() as *const u8,
-                    exe_w.len() * 2,
-                );
-                let _ = RegSetValueExW(
-                    hkey,
-                    PCWSTR::from_raw(name_w.as_ptr()),
-                    0,
-                    REG_SZ,
-                    Some(bytes),
-                );
-            }
-        }
-        let _ = RegCloseKey(hkey);
+    if is_startup_enabled() {
+        let _ = os::registry::delete_value(STARTUP_REGISTRY_PATH, STARTUP_VALUE_NAME);
+    } else if let Ok(exe) = std::env::current_exe() {
+        let quoted = format!("\"{}\"", exe.to_string_lossy());
+        let _ = os::registry::write_string(STARTUP_REGISTRY_PATH, STARTUP_VALUE_NAME, &quoted);
     }
 }
-

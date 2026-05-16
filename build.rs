@@ -1,24 +1,16 @@
-use winres::{VersionInfo, WindowsResource};
+// Compiles `res/icon.rc` into the binary as Windows PE resources.
+//
+// `embed-resource` shells out to `rc.exe` (when a Windows SDK is on PATH) or
+// `windres` (MinGW) to produce a .res object that the linker bakes into the
+// .exe alongside our Rust code. The .rc file references `src/icons/icon.ico`
+// via a relative path; keep that path stable.
 
 fn main() {
-    let version = env!("CARGO_PKG_VERSION");
-    let mut res = WindowsResource::new();
-    let numeric_version = pack_version(version);
-
-    res.set_icon("src/icons/icon.ico")
-        .set("FileVersion", version)
-        .set("ProductVersion", version)
-        .set_version_info(VersionInfo::FILEVERSION, numeric_version)
-        .set_version_info(VersionInfo::PRODUCTVERSION, numeric_version);
-
-    res.compile().expect("Failed to compile Windows resources");
-}
-
-fn pack_version(version: &str) -> u64 {
-    let core = version.split('-').next().unwrap_or(version);
-    let mut parts = core.split('.').map(|p| p.parse::<u64>().unwrap_or(0));
-    let major = parts.next().unwrap_or(0).min(u16::MAX as u64);
-    let minor = parts.next().unwrap_or(0).min(u16::MAX as u64);
-    let patch = parts.next().unwrap_or(0).min(u16::MAX as u64);
-    (major << 48) | (minor << 32) | (patch << 16)
+    // `compile` returns a `CompilationResult` annotated `#[must_use]` on
+    // embed-resource 3.x. `manifest_optional()` collapses Linux/Mac no-op
+    // cases (where there's no `rc.exe`) into Ok while still surfacing real
+    // failures on Windows.
+    embed_resource::compile("res/icon.rc", embed_resource::NONE)
+        .manifest_optional()
+        .expect("Failed to compile Windows resources");
 }

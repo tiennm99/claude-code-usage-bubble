@@ -12,10 +12,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::diagnose;
-use crate::localization::Strings;
-use crate::native_interop::{wide_str, Color};
-use crate::tray_icon::TrayIconKind;
+use crate::i18n::LocaleStrings;
+use crate::os::{to_utf16_nul as wide_str, Rgb as Color};
+use crate::usage::ProviderId;
+type TrayIconKind = ProviderId;
 
 const CLASS_NAME: &str = "ClaudeCodeUsageBubblePanel";
 const PANEL_W_LOGICAL: i32 = 280;
@@ -33,9 +33,7 @@ pub struct PanelData {
     pub weekly_pct: f64,
     pub weekly_text: String,
     pub is_dark: bool,
-    pub strings: Strings,
-    pub claude_label: String,
-    pub codex_label: String,
+    pub strings: LocaleStrings,
 }
 
 struct PanelState {
@@ -68,7 +66,7 @@ pub fn register_class() {
             ..Default::default()
         };
         if RegisterClassExW(&wc) == 0 {
-            diagnose::log("panel RegisterClassExW returned 0");
+            log::error!("panel RegisterClassExW returned 0");
         }
     });
 }
@@ -162,7 +160,7 @@ fn create_panel_window(x: i32, y: i32, w: i32, h: i32) -> Option<HWND> {
         .unwrap_or_default()
     };
     if hwnd == HWND::default() {
-        diagnose::log("panel CreateWindowExW failed");
+        log::error!("panel CreateWindowExW failed");
         None
     } else {
         Some(hwnd)
@@ -275,8 +273,8 @@ fn paint(hwnd: HWND, hdc: HDC) {
 
         // Header row: model label
         let header = match data.model {
-            TrayIconKind::Claude => data.claude_label.clone(),
-            TrayIconKind::Codex => data.codex_label.clone(),
+            ProviderId::Claude => data.strings.claude_label.clone(),
+            ProviderId::ChatGpt => data.strings.chatgpt_label.clone(),
         };
         draw_text(
             hdc,
@@ -301,7 +299,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
 
         draw_row(
             hdc,
-            data.strings.session_window,
+            &data.strings.session_window,
             scaled(PADDING_LOGICAL),
             row1_y,
             bar_x,
@@ -317,7 +315,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
 
         draw_row(
             hdc,
-            data.strings.weekly_window,
+            &data.strings.weekly_window,
             scaled(PADDING_LOGICAL),
             row2_y,
             bar_x,
@@ -474,9 +472,7 @@ fn clone_data() -> Option<PanelData> {
         weekly_pct: p.data.weekly_pct,
         weekly_text: p.data.weekly_text.clone(),
         is_dark: p.data.is_dark,
-        strings: p.data.strings,
-        claude_label: p.data.claude_label.clone(),
-        codex_label: p.data.codex_label.clone(),
+        strings: p.data.strings.clone(),
     })
 }
 

@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::bubble::DEFAULT_BUBBLE_SIZE;
-use crate::tray_icon::TrayIconKind;
+use crate::usage::ProviderId;
+type TrayIconKind = ProviderId;
 
 const APP_DIR_NAME: &str = "ClaudeCodeUsageBubble";
 const SETTINGS_FILE: &str = "settings.json";
@@ -38,20 +39,20 @@ pub struct BubblePositions {
 impl BubblePositions {
     pub fn get(&self, model: TrayIconKind) -> Option<(i32, i32)> {
         match model {
-            TrayIconKind::Claude => self.claude,
-            TrayIconKind::Codex => self.codex,
+            ProviderId::Claude => self.claude,
+            ProviderId::ChatGpt => self.codex,
         }
     }
     pub fn set(&mut self, model: TrayIconKind, pos: (i32, i32)) {
         match model {
-            TrayIconKind::Claude => self.claude = Some(pos),
-            TrayIconKind::Codex => self.codex = Some(pos),
+            ProviderId::Claude => self.claude = Some(pos),
+            ProviderId::ChatGpt => self.codex = Some(pos),
         }
     }
     pub fn reset(&mut self, model: TrayIconKind) {
         match model {
-            TrayIconKind::Claude => self.claude = None,
-            TrayIconKind::Codex => self.codex = None,
+            ProviderId::Claude => self.claude = None,
+            ProviderId::ChatGpt => self.codex = None,
         }
     }
     pub fn reset_all(&mut self) {

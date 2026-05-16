@@ -1,0 +1,232 @@
+// Claude (Anthropic) usage provider.
+//
+// Two HTTP paths: the dedicated `/api/oauth/usage` endpoint (preferred,
+// returns structured JSON with ISO 8601 reset times) and a fallback POST
+// to `/v1/messages` that exposes rate-limit data via response headers.
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::Deserialize;
+
+use crate::creds::{CredentialSource, Locator};
+use crate::net::Client;
+use crate::usage::{headers, Error, ProviderId, UsageProvider, UsageWindows, Window};
+
+const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+const BETA_HEADER: &str = "oauth-2025-04-20";
+const API_VERSION: &str = "2023-06-01";
+
+const PROBE_MODELS: &[&str] = &[
+    "claude-3-haiku-20240307",
+    "claude-haiku-4-5-20251001",
+];
+
+pub struct ClaudeProvider {
+    locator: Locator,
+}
+
+impl ClaudeProvider {
+    pub fn new(locator: Locator) -> Self {
+        Self { locator }
+    }
+
+    pub fn locator(&self) -> &Locator {
+        &self.locator
+    }
+}
+
+impl UsageProvider for ClaudeProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Claude
+    }
+
+    fn poll(&mut self, http: &Client) -> Result<UsageWindows, Error> {
+        let source = self.locator.first_available().ok_or(Error::NoCredentials)?;
+        let token = source.read()?;
+        if token_is_expired(token.expires_at_unix_ms) {
+            return Err(Error::AuthRequired);
+        }
+        fetch_with_fallback(http, &token.access_token)
+    }
+}
+
+fn fetch_with_fallback(http: &Client, token: &str) -> Result<UsageWindows, Error> {
+    // First try the dedicated endpoint.
+    match try_usage_endpoint(http, token)? {
+        Some(windows) if has_reset_times(&windows) => return Ok(windows),
+        Some(partial) => {
+            // Got percentages but no reset times — fill them in from messages.
+            if let Ok(fallback) = try_messages_endpoint(http, token) {
+                return Ok(merge_resets(partial, fallback));
+            }
+            return Ok(partial);
+        }
+        None => {}
+    }
+    try_messages_endpoint(http, token)
+}
+
+fn try_usage_endpoint(http: &Client, token: &str) -> Result<Option<UsageWindows>, Error> {
+    let resp = match http
+        .get(USAGE_URL)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("anthropic-beta", BETA_HEADER)
+        .send()
+    {
+        Ok(r) => r,
+        Err(crate::net::Error::Status(code)) if code == 401 || code == 403 => {
+            return Err(Error::AuthRequired);
+        }
+        Err(_) => return Ok(None),
+    };
+    if resp.status() == 401 || resp.status() == 403 {
+        return Err(Error::AuthRequired);
+    }
+    if !(200..300).contains(&resp.status()) {
+        return Ok(None);
+    }
+    let body: OauthUsage = match resp.json() {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+    let primary = body.five_hour.map(bucket_to_window).unwrap_or_default();
+    let secondary = body.seven_day.map(bucket_to_window).unwrap_or_default();
+    Ok(Some(UsageWindows { primary, secondary }))
+}
+
+fn try_messages_endpoint(http: &Client, token: &str) -> Result<UsageWindows, Error> {
+    for model in PROBE_MODELS {
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "."}],
+        });
+        let resp = match http
+            .post(MESSAGES_URL)
+            .header("Authorization", &format!("Bearer {token}"))
+            .header("anthropic-version", API_VERSION)
+            .header("anthropic-beta", BETA_HEADER)
+            .json_body(&body)
+            .and_then(|rb| rb.send())
+        {
+            Ok(r) => r,
+            Err(crate::net::Error::Status(code)) if code == 401 || code == 403 => {
+                return Err(Error::AuthRequired);
+            }
+            Err(_) => continue,
+        };
+        if resp.status() == 401 || resp.status() == 403 {
+            return Err(Error::AuthRequired);
+        }
+        // Even an error response from Messages can carry rate-limit headers.
+        if resp.header("anthropic-ratelimit-unified-5h-utilization").is_some()
+            || resp.header("anthropic-ratelimit-unified-7d-utilization").is_some()
+        {
+            return Ok(headers::parse_anthropic(&resp));
+        }
+    }
+    Err(Error::BadResponse(
+        "no rate-limit headers in messages response".into(),
+    ))
+}
+
+fn bucket_to_window(bucket: Bucket) -> Window {
+    Window {
+        utilization: bucket.utilization,
+        resets_at: bucket.resets_at.as_deref().and_then(parse_iso8601),
+    }
+}
+
+fn has_reset_times(w: &UsageWindows) -> bool {
+    w.primary.resets_at.is_some() && w.secondary.resets_at.is_some()
+}
+
+fn merge_resets(mut primary: UsageWindows, fallback: UsageWindows) -> UsageWindows {
+    if primary.primary.resets_at.is_none() {
+        primary.primary.resets_at = fallback.primary.resets_at;
+    }
+    if primary.secondary.resets_at.is_none() {
+        primary.secondary.resets_at = fallback.secondary.resets_at;
+    }
+    primary
+}
+
+fn token_is_expired(expires_at_unix_ms: Option<i64>) -> bool {
+    let Some(exp_ms) = expires_at_unix_ms else {
+        return false;
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    now_ms >= exp_ms
+}
+
+// --- ISO 8601 parsing (minimal — handles "YYYY-MM-DDTHH:MM:SS[.frac][Z|+00:00]") ---
+
+fn parse_iso8601(s: &str) -> Option<SystemTime> {
+    let trimmed = s.split('Z').next().unwrap_or(s);
+    let trimmed = trimmed.split('+').next().unwrap_or(trimmed);
+    let trimmed = trimmed.split('-').take(3).collect::<Vec<_>>().join("-");
+    // We want the original `s` for parsing time-part. Re-split on 'T'.
+    let (date, time) = s
+        .split_once('T')
+        .map(|(d, t)| (d, t))
+        .or_else(|| Some(("", "")))?;
+    let _ = trimmed; // shadow; using the raw `date` + `time` below.
+
+    let date_parts: Vec<&str> = date.split('-').collect();
+    if date_parts.len() != 3 {
+        return None;
+    }
+    let y: u64 = date_parts[0].parse().ok()?;
+    let mo: u64 = date_parts[1].parse().ok()?;
+    let d: u64 = date_parts[2].parse().ok()?;
+
+    let time_no_offset = time
+        .split(|c| c == 'Z' || c == '+' || (c == '-' && time.find(c) != Some(0)))
+        .next()
+        .unwrap_or(time);
+    let time_no_frac = time_no_offset.split('.').next().unwrap_or(time_no_offset);
+    let time_parts: Vec<&str> = time_no_frac.split(':').collect();
+    if time_parts.len() != 3 {
+        return None;
+    }
+    let h: u64 = time_parts[0].parse().ok()?;
+    let mi: u64 = time_parts[1].parse().ok()?;
+    let se: u64 = time_parts[2].parse().ok()?;
+
+    let mut days: u64 = 0;
+    for year in 1970..y {
+        days += if is_leap(year) { 366 } else { 365 };
+    }
+    const DAYS_IN_MONTH: [u64; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    for month in 1..mo {
+        days += DAYS_IN_MONTH[month as usize];
+        if month == 2 && is_leap(y) {
+            days += 1;
+        }
+    }
+    days += d - 1;
+    let secs = days * 86_400 + h * 3_600 + mi * 60 + se;
+    Some(UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+fn is_leap(year: u64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+// --- JSON shape ---
+
+#[derive(Deserialize)]
+struct OauthUsage {
+    five_hour: Option<Bucket>,
+    seven_day: Option<Bucket>,
+}
+
+#[derive(Deserialize)]
+struct Bucket {
+    utilization: f64,
+    resets_at: Option<String>,
+}
