@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (must already exist, e.g. v0.1.1)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $env:GITHUB_REF -replace '^refs/tags/',''
+          } else {
+            '${{ github.event.inputs.tag }}'
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Verify Cargo.toml version matches tag
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.tag.outputs.tag }}'
+          $expected = $tag -replace '^v',''
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($cargoVersion -ne $expected) {
+            Write-Error "Tag ($tag -> $expected) does not match Cargo.toml version ($cargoVersion). Bump Cargo.toml before tagging."
+            exit 1
+          }
+          Write-Host "Cargo version $cargoVersion matches tag $tag"
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.tag.outputs.tag }}'
+          $asset = 'target/release/claude-code-usage-bubble.exe'
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            gh release create $tag $asset --title $tag --generate-notes --draft
+          } else {
+            gh release create $tag $asset --title $tag --generate-notes
+          }
