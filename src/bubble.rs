@@ -888,7 +888,12 @@ fn check_fullscreen(bubble_hwnd: HWND) {
 
 const ACCENT_STRIPE_W_LOGICAL: i32 = 4;
 const LABEL_PAD_LOGICAL: i32 = 6;
-const COUNTDOWN_TEMPLATE: &str = "999d";
+// Sized for the widest countdown across all shipped locales. Korean
+// "999시간" (3 digits + 2 CJK chars for the hour suffix) is the current
+// worst case; ASCII-only "999d" was too narrow and let CJK text spill
+// out of the column. Update this when adding a locale with a longer
+// suffix.
+const COUNTDOWN_TEMPLATE: &str = "999시간";
 // Percent now lives in its own column between the bar and the countdown so
 // the two numeric readouts ("44%" and "3h") sit next to each other for
 // quick scanning, and the percent never has to fight the bar's fill colour
@@ -1296,8 +1301,10 @@ fn paint_text_layer(hdc: HDC, layout: &BarLayout, inputs: &PaintInputs) {
         let label_font = create_font(layout.label_font_px, &font_name, FW_NORMAL.0 as i32);
         SetBkMode(hdc, TRANSPARENT);
 
-        // Row labels in the left column.
-        SelectObject(hdc, label_font);
+        // Save the DC's original font so we can restore it before deleting
+        // ours. DeleteObject silently fails on a still-selected HFONT,
+        // which would leak the handle on every paint frame.
+        let prev_font = SelectObject(hdc, label_font);
         SetTextColor(hdc, COLORREF(muted_color.into_colorref()));
         draw_label(hdc, layout, layout.row1_y, "5h");
         draw_label(hdc, layout, layout.row2_y, "7d");
@@ -1314,6 +1321,8 @@ fn paint_text_layer(hdc: HDC, layout: &BarLayout, inputs: &PaintInputs) {
         draw_countdown(hdc, layout, layout.row1_y, &inputs.session_text);
         draw_countdown(hdc, layout, layout.row2_y, &inputs.weekly_text);
 
+        // Restore the original font, then it is safe to delete ours.
+        SelectObject(hdc, prev_font);
         let _ = DeleteObject(main_font);
         let _ = DeleteObject(bold_font);
         let _ = DeleteObject(label_font);

@@ -504,19 +504,27 @@ fn place_near(anchor: RECT, panel_w: i32, panel_h: i32) -> (i32, i32) {
     // Anchor below the bubble by default; flip above if it would clip.
     let mut x = anchor.left;
     let mut y = anchor.bottom + 8;
-    let virtual_screen_h = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-    let virtual_screen_w = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
-    if y + panel_h > virtual_screen_h {
+    // The virtual screen spans all monitors. Its origin is offset from
+    // the primary monitor when a secondary monitor sits left of / above
+    // the primary, so clamps must include SM_XVIRTUALSCREEN /
+    // SM_YVIRTUALSCREEN — not just the width/height of the union.
+    let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+    let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+    let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+    let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+    let right = vx + vw;
+    let bottom = vy + vh;
+    if y + panel_h > bottom {
         y = anchor.top - panel_h - 8;
     }
-    if y < 0 {
-        y = anchor.top;
+    if y < vy {
+        y = anchor.top.max(vy);
     }
-    if x + panel_w > virtual_screen_w {
-        x = virtual_screen_w - panel_w - 8;
+    if x + panel_w > right {
+        x = right - panel_w - 8;
     }
-    if x < 0 {
-        x = 8;
+    if x < vx {
+        x = vx + 8;
     }
     (x, y)
 }

@@ -6,7 +6,8 @@
 // message-only window owned by this module.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::core::PCWSTR;
@@ -33,6 +34,11 @@ use crate::usage::{self, ProviderId, Registry, UsageWindows};
 
 // Win32 message IDs owned by this module.
 pub const WM_APP_USAGE_UPDATED: u32 = 0x8001;
+// Posted from the update worker thread when the swap-and-restart cmd
+// handoff has been launched successfully. The UI thread responds by
+// calling PostQuitMessage(0) to release the file lock on the running
+// .exe so cmd.exe can overwrite it.
+pub const WM_APP_UPDATE_APPLIED: u32 = 0x8002;
 
 // Timer IDs used with `SetTimer(msg_hwnd, …)`.
 const TIMER_POLL: usize = 1;
@@ -106,8 +112,13 @@ struct AppState {
     i18n: I18n,
     is_dark: bool,
     install_channel: InstallChannel,
-    http: net::Client,
-    registry: Registry,
+    // http and registry live behind Arc so worker threads can hold them
+    // without keeping the global state mutex locked across blocking I/O.
+    // The registry's own mutex is only contended by other workers
+    // (the in-flight gate ensures at most one poll runs at a time), so
+    // the UI thread never waits on it.
+    http: Arc<net::Client>,
+    registry: Arc<Mutex<Registry>>,
     snapshots: HashMap<ProviderId, ProviderUiState>,
     last_poll_ok: bool,
     update_status: UpdateStatus,
@@ -182,8 +193,8 @@ pub fn run() {
         i18n,
         is_dark,
         install_channel,
-        http,
-        registry: Registry::with_defaults(),
+        http: Arc::new(http),
+        registry: Arc::new(Mutex::new(Registry::with_defaults())),
         snapshots: HashMap::new(),
         last_poll_ok: false,
         update_status: UpdateStatus::Idle,
@@ -293,6 +304,10 @@ unsafe extern "system" fn msg_wnd_proc(
             propagate_to_ui();
             LRESULT(0)
         }
+        WM_APP_UPDATE_APPLIED => {
+            PostQuitMessage(0);
+            LRESULT(0)
+        }
         WM_APP_TRAY => {
             let action = tray::callback::handle(lparam);
             handle_tray_action(action);
@@ -394,13 +409,29 @@ fn on_timer(hwnd: HWND, id: usize) {
 
 // ---------- Poll thread ----------
 
+/// At-most-one-in-flight gate for the poll worker. Spam-clicking Refresh
+/// would otherwise stack concurrent HTTPS calls onto the same registry,
+/// which both wastes bandwidth and (before the registry mutex landed)
+/// could let two poll cycles interleave their writes to the snapshot map.
+static POLL_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
 fn spawn_poll_thread() {
+    if POLL_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     let msg_hwnd = match lock_state().as_ref() {
         Some(s) => s.msg_hwnd,
-        None => return,
+        None => {
+            POLL_IN_FLIGHT.store(false, Ordering::Release);
+            return;
+        }
     };
     std::thread::spawn(move || {
         do_poll();
+        POLL_IN_FLIGHT.store(false, Ordering::Release);
         unsafe {
             let _ = PostMessageW(
                 msg_hwnd.to_hwnd(),
@@ -413,17 +444,23 @@ fn spawn_poll_thread() {
 }
 
 fn do_poll() {
-    let results = {
-        let mut s = lock_state();
-        let Some(s) = s.as_mut() else {
+    // Snapshot the inputs we need, then DROP the global lock before any
+    // HTTPS call. Holding `lock_state()` through `poll_enabled` would block
+    // the UI thread on every paint/menu for the duration of the request.
+    let (http, registry, settings) = {
+        let s = lock_state();
+        let Some(s) = s.as_ref() else {
             return;
         };
-        let settings = s.settings.clone();
-        s.registry.poll_enabled(&s.http, &settings)
+        (s.http.clone(), s.registry.clone(), s.settings.clone())
+    };
+    let results = {
+        let mut reg = registry.lock().expect("registry mutex poisoned");
+        reg.poll_enabled(&http, &settings)
     };
     let auth_failures = apply_results(results);
     if !auth_failures.is_empty() {
-        attempt_refresh(auth_failures);
+        attempt_refresh(auth_failures, &registry);
     }
 }
 
@@ -467,21 +504,24 @@ fn apply_results(
     auth_failures
 }
 
-fn attempt_refresh(failures: Vec<ProviderId>) {
+fn attempt_refresh(failures: Vec<ProviderId>, registry: &Arc<Mutex<Registry>>) {
     let orchestrator = usage::refresh::Orchestrator::new(REFRESH_TIMEOUT);
-    let mut needs_balloon = false;
+    // Pick the first provider whose refresh did not succeed and balloon
+    // for it specifically. If both providers fail in the same cycle the
+    // second will resurface on the next poll once the first is re-auth'd.
+    let mut balloon_for: Option<ProviderId> = None;
     for id in failures {
-        let outcome = match lock_state().as_ref() {
-            Some(s) => s.registry.try_refresh(id, &orchestrator),
-            None => return,
+        let outcome = {
+            let reg = registry.lock().expect("registry mutex poisoned");
+            reg.try_refresh(id, &orchestrator)
         };
         log::info!("refresh for {id:?}: {outcome:?}");
         if !matches!(outcome, usage::refresh::Outcome::Refreshed) {
-            needs_balloon = true;
+            balloon_for.get_or_insert(id);
         }
     }
-    if needs_balloon {
-        show_token_expired_balloon();
+    if let Some(provider) = balloon_for {
+        show_token_expired_balloon(provider);
     }
 }
 
@@ -712,7 +752,7 @@ fn handle_tray_action(action: TrayAction) {
     }
 }
 
-fn show_token_expired_balloon() {
+fn show_token_expired_balloon(failed: ProviderId) {
     let payload = {
         let mut s = lock_state();
         let Some(s) = s.as_mut() else {
@@ -725,20 +765,17 @@ fn show_token_expired_balloon() {
         }
         s.last_balloon_at = Some(Instant::now());
         let strings = s.i18n.strings();
-        let (kind, title, body) = if s.settings.show_claude_code {
-            (
-                ProviderId::Claude,
+        let (title, body) = match failed {
+            ProviderId::Claude => (
                 strings.token_expired_title.clone(),
                 strings.token_expired_body.clone(),
-            )
-        } else {
-            (
-                ProviderId::ChatGpt,
+            ),
+            ProviderId::ChatGpt => (
                 strings.chatgpt_token_expired_title.clone(),
                 strings.chatgpt_token_expired_body.clone(),
-            )
+            ),
         };
-        (s.msg_hwnd, kind, title, body)
+        (s.msg_hwnd, failed, title, body)
     };
     tray::notify(payload.0.to_hwnd(), payload.1, &payload.2, &payload.3);
 }
@@ -787,7 +824,11 @@ fn show_context_menu(owner_hwnd: HWND) {
 
         append_item(menu, IDM_REFRESH, &snap.strings.refresh, MENU_ITEM_FLAGS(0));
 
-        let freq = CreatePopupMenu().unwrap();
+        let Ok(freq) = CreatePopupMenu() else {
+            log::error!("CreatePopupMenu(freq) failed");
+            let _ = DestroyMenu(menu);
+            return;
+        };
         for (id, interval, label) in [
             (IDM_FREQ_1MIN, POLL_1_MIN, &snap.strings.one_minute),
             (IDM_FREQ_5MIN, POLL_5_MIN, &snap.strings.five_minutes),
@@ -803,7 +844,11 @@ fn show_context_menu(owner_hwnd: HWND) {
         }
         append_submenu(menu, freq, &snap.strings.update_frequency);
 
-        let models = CreatePopupMenu().unwrap();
+        let Ok(models) = CreatePopupMenu() else {
+            log::error!("CreatePopupMenu(models) failed");
+            let _ = DestroyMenu(menu);
+            return;
+        };
         append_item(
             models,
             IDM_MODEL_CLAUDE,
@@ -818,7 +863,11 @@ fn show_context_menu(owner_hwnd: HWND) {
         );
         append_submenu(menu, models, &snap.strings.models);
 
-        let settings_menu = CreatePopupMenu().unwrap();
+        let Ok(settings_menu) = CreatePopupMenu() else {
+            log::error!("CreatePopupMenu(settings_menu) failed");
+            let _ = DestroyMenu(menu);
+            return;
+        };
         append_item(
             settings_menu,
             IDM_START_WITH_WINDOWS,
@@ -832,7 +881,12 @@ fn show_context_menu(owner_hwnd: HWND) {
             MENU_ITEM_FLAGS(0),
         );
 
-        let lang = CreatePopupMenu().unwrap();
+        let Ok(lang) = CreatePopupMenu() else {
+            log::error!("CreatePopupMenu(lang) failed");
+            let _ = DestroyMenu(settings_menu);
+            let _ = DestroyMenu(menu);
+            return;
+        };
         append_item(
             lang,
             IDM_LANG_SYSTEM,
@@ -867,7 +921,12 @@ fn show_context_menu(owner_hwnd: HWND) {
         };
         append_item(settings_menu, IDM_VERSION_ACTION, &version_label, version_flags);
 
-        let auto_update = CreatePopupMenu().unwrap();
+        let Ok(auto_update) = CreatePopupMenu() else {
+            log::error!("CreatePopupMenu(auto_update) failed");
+            let _ = DestroyMenu(settings_menu);
+            let _ = DestroyMenu(menu);
+            return;
+        };
         for (id, value, label) in [
             (IDM_UPDATE_AUTO_OFF, None, &snap.strings.auto_check_disabled),
             (
@@ -1086,31 +1145,46 @@ fn version_action() {
     };
     match act {
         Act::Apply(release, channel) => {
-            if let Some(s) = lock_state().as_mut() {
+            // Set the Applying status synchronously so the menu reflects
+            // it immediately, then move the (potentially several-second)
+            // download to a worker thread. Holding the UI thread here
+            // would freeze paints and menus until the download finished.
+            let (http, msg_hwnd) = {
+                let mut guard = lock_state();
+                let Some(s) = guard.as_mut() else {
+                    return;
+                };
                 s.update_status = UpdateStatus::Applying;
-            }
-            let result: Result<(), Box<dyn std::error::Error>> = match channel {
-                InstallChannel::Winget => {
-                    // Winget channel is reserved for future use; until a
-                    // winget package ships, this branch is unreachable.
-                    Err("winget channel not supported yet".into())
-                }
-                InstallChannel::Portable => {
-                    match net::Client::new(HTTP_USER_AGENT) {
-                        Ok(c) => update::install::begin(&c, &release).map_err(|e| e.into()),
-                        Err(e) => Err(e.into()),
-                    }
-                }
+                (s.http.clone(), s.msg_hwnd)
             };
-            match result {
-                Ok(()) => unsafe { PostQuitMessage(0) },
-                Err(e) => {
-                    log::error!("update apply failed: {e}");
-                    if let Some(s) = lock_state().as_mut() {
-                        s.update_status = UpdateStatus::Failed;
+            std::thread::spawn(move || {
+                let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = match channel {
+                    InstallChannel::Winget => {
+                        // Winget channel is reserved for future use; until a
+                        // winget package ships, this branch is unreachable.
+                        Err("winget channel not supported yet".into())
+                    }
+                    InstallChannel::Portable => {
+                        update::install::begin(&http, &release).map_err(|e| e.into())
+                    }
+                };
+                match result {
+                    Ok(()) => unsafe {
+                        let _ = PostMessageW(
+                            msg_hwnd.to_hwnd(),
+                            WM_APP_UPDATE_APPLIED,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    },
+                    Err(e) => {
+                        log::error!("update apply failed: {e}");
+                        if let Some(s) = lock_state().as_mut() {
+                            s.update_status = UpdateStatus::Failed;
+                        }
                     }
                 }
-            }
+            });
         }
         Act::Check(hwnd) => begin_update_check(hwnd.to_hwnd()),
     }
