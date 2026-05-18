@@ -6,6 +6,8 @@
 // message-only window owned by this module.
 
 use std::collections::HashMap;
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -69,6 +71,7 @@ const IDM_MODEL_CHATGPT: u16 = 21;
 const IDM_START_WITH_WINDOWS: u16 = 30;
 const IDM_RESET_POSITION: u16 = 31;
 const IDM_VERSION_ACTION: u16 = 32;
+const IDM_RESTART: u16 = 33;
 const IDM_LANG_SYSTEM: u16 = 40;
 // 50 is reserved by tray::IDM_TOGGLE_WIDGET — keep the auto-update range
 // clear of it (and any future tray ids in the 5x band).
@@ -385,8 +388,12 @@ pub fn on_menu_command(id: u32, _owner_hwnd: HWND) {
             set_update_check_interval(Some(settings::UPDATE_CHECK_WEEKLY_SECS))
         }
         IDM_LANG_SYSTEM => set_language(None),
-        x if x >= IDM_LANG_BASE => set_language_by_index((x - IDM_LANG_BASE) as usize),
+        // Static ids in the 30-99 band must match BEFORE the dynamic
+        // language guard, otherwise `x >= IDM_LANG_BASE` would swallow any
+        // future id that creeps into the >=100 range.
         tray::IDM_TOGGLE_WIDGET => toggle_widget_visibility(),
+        IDM_RESTART => restart_app(),
+        x if x >= IDM_LANG_BASE => set_language_by_index((x - IDM_LANG_BASE) as usize),
         _ => {}
     }
 }
@@ -1034,6 +1041,7 @@ fn show_context_menu(owner_hwnd: HWND) {
             if snap.widget_visible { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
         );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_item(menu, IDM_RESTART, &snap.strings.restart, MENU_ITEM_FLAGS(0));
         append_item(menu, IDM_EXIT, &snap.strings.exit, MENU_ITEM_FLAGS(0));
 
         let mut pt = POINT::default();
@@ -1358,6 +1366,62 @@ fn set_update_check_interval(value: Option<u64>) {
     }
     if value.is_some() {
         schedule_update_check_timer(hwnd);
+    }
+}
+
+// ---------- Restart ----------
+
+// Windows CreateProcess flags. Match the values used by `update::install`
+// so the cmd-handoff child detaches cleanly without flashing a console.
+const RESTART_CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const RESTART_DETACHED_PROCESS: u32 = 0x0000_0008;
+
+/// Relaunch the running binary via a detached cmd.exe handoff.
+///
+/// The 1-second `timeout` gives the current process time to release the
+/// `Global\ClaudeCodeUsageBubble` mutex before the relaunched instance's
+/// `CreateMutexW` runs, otherwise the new instance would see
+/// `ERROR_ALREADY_EXISTS` and exit immediately.
+fn restart_app() {
+    // Defensive flush — bubble positions and most settings already persist
+    // on change, but a final save is cheap insurance. Snapshot then drop the
+    // lock before the disk write so the UI thread doesn't block on I/O.
+    let snap = lock_state().as_ref().map(|s| s.settings.clone());
+    if let Some(s) = snap {
+        settings::save(&s);
+    }
+
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            log::error!("restart: current_exe failed: {e}");
+            return;
+        }
+    };
+    let exe_str = exe.to_string_lossy();
+    // cmd.exe expands `%var%` inside double quotes, so a path containing `%`
+    // would let the environment leak into the relaunch. Refuse — matches the
+    // defense already used in `update::install`.
+    if exe_str.contains('%') {
+        log::error!("restart: refusing path containing '%': {exe_str}");
+        return;
+    }
+    let exe_str = exe_str.replace('"', "");
+    let cmd = format!(r#"timeout /t 1 /nobreak >nul & start "" "{exe_str}""#);
+    let spawned = Command::new("cmd.exe")
+        .raw_arg("/c")
+        .raw_arg(format!("\"{cmd}\""))
+        .creation_flags(RESTART_CREATE_NO_WINDOW | RESTART_DETACHED_PROCESS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(_) => {
+            log::info!("restart: cmd handoff spawned, posting quit");
+            unsafe { PostQuitMessage(0) };
+        }
+        Err(e) => log::error!("restart: cmd spawn failed: {e}"),
     }
 }
 

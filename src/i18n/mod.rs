@@ -49,6 +49,7 @@ pub struct LocaleStrings {
     pub auto_check_daily: String,
     pub auto_check_weekly: String,
     pub exit: String,
+    pub restart: String,
     pub show_widget: String,
     pub session_window: String,
     pub weekly_window: String,
