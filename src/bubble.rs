@@ -133,16 +133,16 @@ pub fn create(config: BubbleConfig) -> HWND {
     let initial_size_logical = config
         .size_logical
         .clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
+    let dpi_for_create = primary_dpi();
+    let width_px = scale_to_dpi(initial_size_logical, dpi_for_create);
+    let height_px = scale_to_dpi(bubble_height_logical(initial_size_logical), dpi_for_create);
+    let (x, y) = config
+        .position
+        .unwrap_or_else(|| default_position(width_px, height_px, config.model));
     let hwnd = unsafe {
         let class_w = wide_str(CLASS_NAME);
         let title_w = wide_str("Claude Code Usage Bubble");
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-        let dpi = primary_dpi();
-        let width_px = scale_to_dpi(initial_size_logical, dpi);
-        let height_px = scale_to_dpi(bubble_height_logical(initial_size_logical), dpi);
-        let (x, y) = config
-            .position
-            .unwrap_or_else(|| default_position(width_px, height_px, config.model));
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
             PCWSTR::from_raw(class_w.as_ptr()),
@@ -216,6 +216,16 @@ pub fn create(config: BubbleConfig) -> HWND {
             pulse_timer_armed: false,
         },
     );
+
+    log::info!(
+        "bubble create model={:?} pos=({x},{y}) size={width_px}x{height_px} dpi={dpi}",
+        config.model
+    );
+
+    // Defense in depth: settings::load already validates positions against
+    // currently-connected monitors, but a monitor unplug between load and
+    // create (or a partially-off-screen saved position) is still possible.
+    clamp_into_work_area(hwnd);
 
     render(hwnd);
     unsafe {
@@ -792,8 +802,26 @@ fn clamp_into_work_area(hwnd: HWND) {
     let w = r.right - r.left;
     let h = r.bottom - r.top;
     let nx = r.left.clamp(wa.left, (wa.right - w).max(wa.left));
-    let ny = r.top.clamp(wa.top, (wa.bottom - h).max(wa.top));
+    let mut ny = r.top.clamp(wa.top, (wa.bottom - h).max(wa.top));
+
+    // When both bubbles get clamped to the same bottom-right corner (e.g.,
+    // saved positions were on a disconnected monitor and the validator missed
+    // them), keep the Codex-above-Claude stagger that `default_position` uses
+    // so they don't visually stack.
+    let is_codex = lock_bubbles()
+        .get(&(hwnd.0 as isize))
+        .is_some_and(|b| matches!(b.model, TrayIconKind::ChatGpt));
+    if is_codex && nx == wa.right - w && ny == wa.bottom - h {
+        const STAGGER_GAP: i32 = 24;
+        ny = (ny - h - STAGGER_GAP).max(wa.top);
+    }
+
     if nx != r.left || ny != r.top {
+        log::warn!(
+            "clamp_into_work_area moved bubble from ({}, {}) to ({nx}, {ny})",
+            r.left,
+            r.top
+        );
         unsafe {
             let _ = SetWindowPos(
                 hwnd,

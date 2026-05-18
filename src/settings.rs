@@ -1,10 +1,17 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Gdi::{MonitorFromRect, MONITOR_DEFAULTTONULL};
 
 use crate::bubble::DEFAULT_BUBBLE_SIZE;
 use crate::usage::ProviderId;
 type TrayIconKind = ProviderId;
+
+// 140px matches MIN_BUBBLE_SIZE — a saved top-left a few px past the work-area
+// edge still passes the validator, but a position fully on a disconnected
+// monitor (the bug we're guarding against) fails.
+const POSITION_PROBE_PX: i32 = 140;
 
 const APP_DIR_NAME: &str = "ClaudeCodeUsageBubble";
 const SETTINGS_FILE: &str = "settings.json";
@@ -67,6 +74,37 @@ impl BubblePositions {
         self.claude = None;
         self.codex = None;
     }
+
+    /// Drop any saved position whose top-left no longer falls on a connected
+    /// monitor. Guards against `bubble::create` placing the window on a
+    /// disconnected secondary monitor (where the user can't see or recover it).
+    pub fn validate(&mut self) {
+        if let Some((x, y)) = self.claude {
+            if !position_on_any_monitor(x, y) {
+                log::warn!("bubble position claude ({x},{y}) outside all monitors; resetting to default");
+                self.claude = None;
+            }
+        }
+        if let Some((x, y)) = self.codex {
+            if !position_on_any_monitor(x, y) {
+                log::warn!("bubble position codex ({x},{y}) outside all monitors; resetting to default");
+                self.codex = None;
+            }
+        }
+    }
+}
+
+fn position_on_any_monitor(x: i32, y: i32) -> bool {
+    // MONITOR_DEFAULTTONULL returns a null HMONITOR when the rect intersects
+    // no connected monitor — exactly the signal we want.
+    let probe = RECT {
+        left: x,
+        top: y,
+        right: x + POSITION_PROBE_PX,
+        bottom: y + POSITION_PROBE_PX,
+    };
+    let monitor = unsafe { MonitorFromRect(&probe, MONITOR_DEFAULTTONULL) };
+    !monitor.is_invalid()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +170,8 @@ pub fn load() -> Settings {
     settings.bubble_size_logical = settings
         .bubble_size_logical
         .clamp(crate::bubble::MIN_BUBBLE_SIZE, crate::bubble::MAX_BUBBLE_SIZE);
+    // Drop positions on monitors that have since been disconnected.
+    settings.bubble_positions.validate();
     settings
 }
 
