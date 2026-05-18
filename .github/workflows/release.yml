@@ -14,10 +14,7 @@ permissions:
 
 jobs:
   build:
-    # Pinned explicitly: `windows-latest` is being redirected to a newer image
-    # by GitHub in mid-2026 — pin the current Windows Server 2025 image so
-    # release behavior is deterministic across that transition.
-    runs-on: windows-2025
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
         with:
