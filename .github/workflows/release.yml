@@ -14,9 +14,12 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # Pinned explicitly: `windows-latest` is being redirected to a newer image
+    # by GitHub in mid-2026 — pin the current Windows Server 2025 image so
+    # release behavior is deterministic across that transition.
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
