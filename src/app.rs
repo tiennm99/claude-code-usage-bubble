@@ -1182,6 +1182,12 @@ fn reset_positions() {
         s.bubbles.clear();
     }
     create_initial_bubbles();
+    // The freshly-spawned bubbles boot with a "…" placeholder. Push the
+    // cached snapshot so they render the last-known data immediately, and
+    // kick a poll for users who used Reset Position to recover from
+    // staleness.
+    propagate_to_ui();
+    spawn_poll_thread();
 }
 
 fn set_language(_dummy: Option<()>) {
