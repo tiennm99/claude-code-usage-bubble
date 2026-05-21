@@ -87,12 +87,9 @@ struct LocaleFile {
 
 const RAW_LOCALES: &[(&str, &str)] = &[
     ("en", include_str!("locales/en.toml")),
-    ("nl", include_str!("locales/nl.toml")),
-    ("es", include_str!("locales/es.toml")),
-    ("fr", include_str!("locales/fr.toml")),
-    ("de", include_str!("locales/de.toml")),
     ("ja", include_str!("locales/ja.toml")),
     ("ko", include_str!("locales/ko.toml")),
+    ("vi", include_str!("locales/vi.toml")),
     ("zh-TW", include_str!("locales/zh-TW.toml")),
 ];
 
