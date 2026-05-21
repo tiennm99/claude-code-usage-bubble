@@ -11,8 +11,8 @@ use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING, NIM_ADD,
-    NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_WARNING,
+    NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, NOTIFY_ICON_INFOTIP_FLAGS,
 };
 use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
 
@@ -81,13 +81,28 @@ pub fn sync(owner: HWND, desired: &[TrayIcon]) {
     }
 }
 
-/// Show a balloon notification on an already-registered icon.
-pub fn notify(owner: HWND, kind: IconKind, title: &str, body: &str) {
+/// Show a yellow-warning balloon on an already-registered icon.
+pub fn notify_warning(owner: HWND, kind: IconKind, title: &str, body: &str) {
+    notify_inner(owner, kind, title, body, NIIF_WARNING);
+}
+
+/// Show a blue-info balloon on an already-registered icon.
+pub fn notify_info(owner: HWND, kind: IconKind, title: &str, body: &str) {
+    notify_inner(owner, kind, title, body, NIIF_INFO);
+}
+
+fn notify_inner(
+    owner: HWND,
+    kind: IconKind,
+    title: &str,
+    body: &str,
+    flags: NOTIFY_ICON_INFOTIP_FLAGS,
+) {
     let mut data = build_data(owner, kind);
     data.uFlags = NIF_INFO;
     write_utf16(&mut data.szInfoTitle, title);
     write_utf16(&mut data.szInfo, body);
-    data.dwInfoFlags = NIIF_WARNING;
+    data.dwInfoFlags = flags;
     unsafe {
         let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
     }

@@ -68,6 +68,13 @@ pub struct LocaleStrings {
     pub threshold_80_body: String,
     /// Body text for the 95% threshold balloon.
     pub threshold_95_body: String,
+    /// Title for the tray balloon shown on first launch after an auto-update.
+    pub update_applied_title: String,
+    /// Prefix for the tray balloon body. Call site appends the version (e.g. "0.1.10").
+    pub update_applied_body: String,
+    /// Prefix for the rollback-failed MessageBox body. Call site appends
+    /// the backup path and a separator with the expected target filename.
+    pub update_rollback_failed_body: String,
 }
 
 #[derive(Deserialize)]

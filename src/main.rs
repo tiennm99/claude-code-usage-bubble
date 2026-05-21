@@ -36,8 +36,34 @@ fn main() {
         std::process::exit(exit_code);
     }
 
-    if diagnose_enabled {
-        log::info!("entering app::run");
+    let wait_pid = args
+        .iter()
+        .position(|a| a == "--wait-pid")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<u32>().ok());
+    if let Some(pid) = wait_pid {
+        if diagnose_enabled {
+            log::info!("waiting up to 5s for parent pid {pid} to exit");
+        }
+        update::handoff::wait_for_parent_exit(pid, 5_000);
     }
-    app::run();
+
+    let updated_to = args
+        .iter()
+        .position(|a| a == "--updated-to")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+
+    if diagnose_enabled {
+        log::info!("entering app::run (wait_pid={wait_pid:?} updated_to={updated_to:?})");
+    }
+    app::run(AppArgs {
+        wait_pid_present: wait_pid.is_some(),
+        updated_to,
+    });
+}
+
+pub struct AppArgs {
+    pub wait_pid_present: bool,
+    pub updated_to: Option<String>,
 }

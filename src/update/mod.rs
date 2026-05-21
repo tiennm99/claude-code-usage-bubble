@@ -1,10 +1,12 @@
 // Self-update subsystem.
 //
 // Two stages: `release::fetch_latest` checks GitHub releases for a newer
-// build; `install::begin` downloads the .exe and hands off to a detached
-// `cmd /c` script that swaps the binary and restarts.
+// build; `install::begin` downloads the .exe, swaps it in via native
+// `MoveFileExW`, then spawns the new binary detached via
+// `CreateProcessW`. No shell handoff — nothing can flash a console.
 
 pub mod channel;
+pub mod handoff;
 pub mod install;
 pub mod release;
 
@@ -24,6 +26,8 @@ pub enum Error {
     ChecksumMismatch { expected: String, actual: String },
     #[error("path rejected for safety: {0}")]
     UnsafePath(String),
+    #[error("file swap failed: {0}")]
+    SwapFailed(String),
 }
 
 pub use channel::{current as current_channel, Channel};

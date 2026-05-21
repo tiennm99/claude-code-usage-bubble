@@ -6,8 +6,7 @@
 // message-only window owned by this module.
 
 use std::collections::HashMap;
-use std::os::windows::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId, Sleep};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -36,10 +35,11 @@ use crate::usage::{self, ProviderId, Registry, UsageWindows};
 
 // Win32 message IDs owned by this module.
 pub const WM_APP_USAGE_UPDATED: u32 = 0x8001;
-// Posted from the update worker thread when the swap-and-restart cmd
-// handoff has been launched successfully. The UI thread responds by
-// calling PostQuitMessage(0) to release the file lock on the running
-// .exe so cmd.exe can overwrite it.
+// Posted from the update worker thread after `install::begin` has
+// already swapped the binary on disk and spawned the new detached
+// child. The UI thread responds with PostQuitMessage(0) so the old
+// instance exits cleanly and releases the singleton mutex for the
+// child waiting on `--wait-pid`.
 pub const WM_APP_UPDATE_APPLIED: u32 = 0x8002;
 
 // Timer IDs used with `SetTimer(msg_hwnd, …)`.
@@ -147,27 +147,52 @@ fn lock_state() -> MutexGuard<'static, Option<AppState>> {
 
 // ---------- Entry ----------
 
-pub fn run() {
+/// Acquire the singleton mutex, optionally retrying for ~3s if the
+/// caller passed `--wait-pid` (i.e. we just spawned from an exiting
+/// parent that has not yet released its handle).
+fn acquire_singleton_mutex(retry: bool) -> Option<HANDLE> {
+    let mutex_name_w = os::to_utf16_nul(APP_MUTEX_NAME);
+    let max_attempts = if retry { 15 } else { 1 };
+    for attempt in 0..max_attempts {
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR::from_raw(mutex_name_w.as_ptr())) };
+        match handle {
+            Ok(h) => {
+                let already = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+                if !already {
+                    return Some(h);
+                }
+                // Mutex still held by parent. Close this handle and retry.
+                unsafe {
+                    let _ = CloseHandle(h);
+                }
+                if attempt + 1 == max_attempts {
+                    log::info!("another instance already running; exiting");
+                    return None;
+                }
+                log::debug!(
+                    "mutex still held by parent (attempt {}/{}), waiting 200ms",
+                    attempt + 1,
+                    max_attempts
+                );
+                unsafe { Sleep(200) };
+            }
+            Err(e) => {
+                log::error!("CreateMutex failed: {e}");
+                return None;
+            }
+        }
+    }
+    None
+}
+
+pub fn run(args: crate::AppArgs) {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
-    let mutex_name_w = os::to_utf16_nul(APP_MUTEX_NAME);
-    let _mutex = unsafe {
-        let handle = CreateMutexW(None, false, PCWSTR::from_raw(mutex_name_w.as_ptr()));
-        match handle {
-            Ok(h) => {
-                if GetLastError() == ERROR_ALREADY_EXISTS {
-                    log::info!("another instance already running; exiting");
-                    return;
-                }
-                h
-            }
-            Err(e) => {
-                log::error!("CreateMutex failed: {e}");
-                return;
-            }
-        }
+    let _mutex = match acquire_singleton_mutex(args.wait_pid_present) {
+        Some(h) => h,
+        None => return,
     };
 
     let settings = settings::load();
@@ -207,6 +232,16 @@ pub fn run() {
 
     create_initial_bubbles();
     refresh_tray_icons();
+
+    // Post-update tasks: show "Updated to vX.Y.Z" balloon (driven by
+    // --updated-to passed by the previous instance) and sweep any
+    // stale `<exe>.old.<pid>` siblings left by past in-place swaps.
+    if let Some(v) = args.updated_to.as_ref() {
+        announce_update_applied(msg_hwnd, v);
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        update::handoff::cleanup_stale_old_exes(&exe_path);
+    }
 
     let poll_interval = lock_state()
         .as_ref()
@@ -828,7 +863,7 @@ fn show_threshold_balloon(provider: ProviderId, threshold: u8) {
         };
         (s.msg_hwnd, provider, title, body)
     };
-    tray::notify(payload.0.to_hwnd(), payload.1, &payload.2, &payload.3);
+    tray::notify_warning(payload.0.to_hwnd(), payload.1, &payload.2, &payload.3);
 }
 
 fn show_token_expired_balloon(failed: ProviderId) {
@@ -856,7 +891,30 @@ fn show_token_expired_balloon(failed: ProviderId) {
         };
         (s.msg_hwnd, failed, title, body)
     };
-    tray::notify(payload.0.to_hwnd(), payload.1, &payload.2, &payload.3);
+    tray::notify_warning(payload.0.to_hwnd(), payload.1, &payload.2, &payload.3);
+}
+
+/// Show the "Updated to vX.Y.Z" balloon on first launch after an
+/// auto-update. Picks Claude as the host icon if it's registered;
+/// otherwise falls back to Codex. If neither is registered the
+/// notification silently drops — better than crashing.
+fn announce_update_applied(_msg_hwnd: HWND, version: &str) {
+    let payload = {
+        let s = lock_state();
+        let Some(s) = s.as_ref() else {
+            return;
+        };
+        let strings = s.i18n.strings();
+        let title = strings.update_applied_title.clone();
+        let body = format!("{}{}", strings.update_applied_body, version);
+        let host = if s.settings.show_claude_code {
+            ProviderId::Claude
+        } else {
+            ProviderId::ChatGpt
+        };
+        (s.msg_hwnd, host, title, body)
+    };
+    tray::notify_info(payload.0.to_hwnd(), payload.1, &payload.2, &payload.3);
 }
 
 // ---------- Context menu ----------
@@ -1377,17 +1435,9 @@ fn set_update_check_interval(value: Option<u64>) {
 
 // ---------- Restart ----------
 
-// Windows CreateProcess flags. Match the values used by `update::install`
-// so the cmd-handoff child detaches cleanly without flashing a console.
-const RESTART_CREATE_NO_WINDOW: u32 = 0x0800_0000;
-const RESTART_DETACHED_PROCESS: u32 = 0x0000_0008;
-
-/// Relaunch the running binary via a detached cmd.exe handoff.
-///
-/// The 1-second `timeout` gives the current process time to release the
-/// `Global\ClaudeCodeUsageBubble` mutex before the relaunched instance's
-/// `CreateMutexW` runs, otherwise the new instance would see
-/// `ERROR_ALREADY_EXISTS` and exit immediately.
+/// Relaunch the running binary by spawning a detached child via
+/// `CreateProcessW`. The child waits on our PID before acquiring the
+/// singleton mutex, so no shell handoff or timer is required.
 fn restart_app() {
     // Defensive flush — bubble positions and most settings already persist
     // on change, but a final save is cheap insurance. Snapshot then drop the
@@ -1404,30 +1454,18 @@ fn restart_app() {
             return;
         }
     };
-    let exe_str = exe.to_string_lossy();
-    // cmd.exe expands `%var%` inside double quotes, so a path containing `%`
-    // would let the environment leak into the relaunch. Refuse — matches the
-    // defense already used in `update::install`.
-    if exe_str.contains('%') {
-        log::error!("restart: refusing path containing '%': {exe_str}");
-        return;
-    }
-    let exe_str = exe_str.replace('"', "");
-    let cmd = format!(r#"timeout /t 1 /nobreak >nul & start "" "{exe_str}""#);
-    let spawned = Command::new("cmd.exe")
-        .raw_arg("/c")
-        .raw_arg(format!("\"{cmd}\""))
-        .creation_flags(RESTART_CREATE_NO_WINDOW | RESTART_DETACHED_PROCESS)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    match spawned {
-        Ok(_) => {
-            log::info!("restart: cmd handoff spawned, posting quit");
+
+    let pid = unsafe { GetCurrentProcessId() };
+    let args = vec![
+        OsString::from("--wait-pid"),
+        OsString::from(pid.to_string()),
+    ];
+    match update::handoff::spawn_detached(&exe, &args) {
+        Ok(()) => {
+            log::info!("restart: spawned detached child (parent pid={pid}), posting quit");
             unsafe { PostQuitMessage(0) };
         }
-        Err(e) => log::error!("restart: cmd spawn failed: {e}"),
+        Err(e) => log::error!("restart: spawn_detached failed: {e}"),
     }
 }
 
