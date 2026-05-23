@@ -1031,23 +1031,29 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let tail_countdown_right = tail_right;
     let tail_countdown_left = tail_countdown_right - countdown_w;
 
-    // Try to seat a 7d% text between the "7d" label and the bar. If that would
-    // squeeze the bar below the 20-logical minimum, collapse the % rect (zero
-    // width) and fall back to the original label→bar→countdown layout. This
-    // keeps the 140-logical bubble legible without dropping the bar.
+    // Try to seat a 7d% text between the "7d" label and the bar. The %
+    // number is the actual data, so it takes precedence over keeping the
+    // bar at its pre-feature minimum: when the % shows, the bar may
+    // compress to `bar_min_with_pct` (still visible as a pill). Only when
+    // even that small bar wouldn't fit do we collapse the % rect entirely
+    // and restore the pre-feature `bar_min` to keep the bar readable.
+    // Without this two-tier threshold, the worst-case CJK countdown column
+    // ("999시간") leaves <20 logical of bar room at the default 200-logical
+    // size on both 100% and 125% DPI, and the % silently disappears.
     let bar_min = scale_to_dpi(20, dpi);
-    let (tail_pct_left, tail_pct_right, tail_bar_left) = {
+    let bar_min_with_pct = scale_to_dpi(8, dpi);
+    let (tail_pct_left, tail_pct_right, tail_bar_left, bar_render_min) = {
         let pct_left = tail_label_right + pad;
         let pct_right = pct_left + pct_reserve_w;
         let bar_left = pct_right + pad;
-        if (tail_countdown_left - pad) - bar_left >= bar_min {
-            (pct_left, pct_right, bar_left)
+        if (tail_countdown_left - pad) - bar_left >= bar_min_with_pct {
+            (pct_left, pct_right, bar_left, bar_min_with_pct)
         } else {
             let bar_left = tail_label_right + pad;
-            (bar_left, bar_left, bar_left)
+            (bar_left, bar_left, bar_left, bar_min)
         }
     };
-    let tail_bar_right = (tail_countdown_left - pad).max(tail_bar_left + bar_min);
+    let tail_bar_right = (tail_countdown_left - pad).max(tail_bar_left + bar_render_min);
     let tail_bar_h = scale_to_dpi(5, dpi);
     let tail_bar_top = (height_px - tail_bar_h) / 2;
 
