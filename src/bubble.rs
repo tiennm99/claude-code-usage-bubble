@@ -1061,7 +1061,7 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let height_px = scale_to_dpi(bubble_height_logical(size_logical), dpi);
     let head_diameter = height_px;
 
-    let head_pad = scale_to_dpi(4, dpi);
+    let head_pad = scale_to_dpi(5, dpi);
     let ring_stroke_w = scale_to_dpi(3, dpi).clamp(2, 4) as f32;
     let ring_cx = (head_diameter as f32) / 2.0;
     let ring_cy = (height_px as f32) / 2.0;
@@ -1069,11 +1069,14 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     // inside the head padding. ring_radius is the centerline radius.
     let ring_outer = (head_diameter as f32) / 2.0 - (head_pad as f32);
     let ring_radius = ring_outer - ring_stroke_w / 2.0;
-    let time_ring_stroke_w = scale_to_dpi(2, dpi).clamp(1, 3) as f32;
+    // Inner ring renders the remaining-time arc. Floor stroke at 2 logical so
+    // it stays visible at smaller bubble sizes (clamp 1 produced a hairline
+    // that disappeared into the track on dark themes).
+    let time_ring_stroke_w = scale_to_dpi(2, dpi).clamp(2, 3) as f32;
     let time_ring_radius =
-        (ring_radius - ring_stroke_w - scale_to_dpi(3, dpi) as f32).max(time_ring_stroke_w);
+        (ring_radius - ring_stroke_w - scale_to_dpi(4, dpi) as f32).max(time_ring_stroke_w);
 
-    let big_font_px = (head_diameter * 26 / 100).max(scale_to_dpi(11, dpi));
+    let big_font_px = (head_diameter * 24 / 100).max(scale_to_dpi(11, dpi));
     let small_font_px = ((big_font_px * 55) / 100).max(scale_to_dpi(9, dpi));
     let main_font_px = small_font_px;
 
@@ -1096,15 +1099,20 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     };
 
     let tail_left = head_diameter;
-    let tail_right = width_px - scale_to_dpi(12, dpi);
+    let tail_right = width_px - scale_to_dpi(14, dpi);
     let pad = scale_to_dpi(6, dpi);
+    // Breathing room between bar end and the right-aligned text. 6 logical
+    // had the bar visually colliding with "100%" / countdown glyphs.
+    let bar_text_gap = scale_to_dpi(8, dpi);
 
     let countdown_w = measure_text_w(mem_dc, COUNTDOWN_TEMPLATE, main_font_px);
     let pct_reserve_w = measure_text_w(mem_dc, "100%", small_font_px) + scale_to_dpi(2, dpi);
 
-    let usage_bar_h = (height_px * 9 / 100).clamp(scale_to_dpi(5, dpi), scale_to_dpi(12, dpi));
-    let time_bar_h = (height_px * 5 / 100).clamp(scale_to_dpi(3, dpi), scale_to_dpi(7, dpi));
-    let lane_gap = scale_to_dpi(5, dpi);
+    // Usage bar carries the primary signal; make it ~2.5x the mass of the
+    // time bar so the two lanes don't read as two competing quotas.
+    let usage_bar_h = (height_px * 10 / 100).clamp(scale_to_dpi(6, dpi), scale_to_dpi(12, dpi));
+    let time_bar_h = (height_px * 4 / 100).clamp(scale_to_dpi(3, dpi), scale_to_dpi(6, dpi));
+    let lane_gap = scale_to_dpi(6, dpi);
     let lanes_h = usage_bar_h + lane_gap + time_bar_h;
     let usage_bar_top = (height_px - lanes_h) / 2;
     let time_bar_top = usage_bar_top + usage_bar_h + lane_gap;
@@ -1116,14 +1124,14 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let content_w = (content_right - content_left).max(0);
     let bar_min = scale_to_dpi(8, dpi);
     let desired_text_w = countdown_w.max(pct_reserve_w);
-    let text_w = if content_w >= desired_text_w + pad + bar_min {
+    let text_w = if content_w >= desired_text_w + bar_text_gap + bar_min {
         desired_text_w
     } else {
-        (content_w - pad - bar_min).max(0)
+        (content_w - bar_text_gap - bar_min).max(0)
     };
     let text_left = content_right - text_w;
     let bar_left = content_left;
-    let bar_right = (text_left - pad).max(bar_left + bar_min);
+    let bar_right = (text_left - bar_text_gap).max(bar_left + bar_min);
 
     BubbleLayout {
         canvas_w: width_px,
@@ -1181,19 +1189,21 @@ fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pi
         Color::from_hex("#F3F3F3")
     };
     let track = if inputs.is_dark {
-        Color::from_hex("#3A3A3A")
+        Color::from_hex("#2C2C2C")
     } else {
-        Color::from_hex("#D6D6D6")
+        Color::from_hex("#E2E2E2")
     };
+    // Inner-ring / time-bar neutral track. Lifted off the background to
+    // clear WCAG 1.4.11 3:1 on dark themes (#303030 on #1F1F1F was ~1.13:1).
     let time_track = if inputs.is_dark {
-        Color::from_hex("#303030")
+        Color::from_hex("#404040")
     } else {
         Color::from_hex("#E0E0E0")
     };
     let time_fill = if inputs.is_dark {
-        Color::from_hex("#9A9A9A")
+        Color::from_hex("#B0B0B0")
     } else {
-        Color::from_hex("#777777")
+        Color::from_hex("#666666")
     };
 
     // ---- Stadium background ----
@@ -1306,7 +1316,12 @@ fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pi
                         let t = pulse_triangle(inputs.pulse_phase);
                         color = brighten(color, t);
                     }
-                    let clipped_w = fill_w.min(bar_w);
+                    // Floor at one cap-diameter so a 1% reading still renders
+                    // as a recognizable dot rather than a sub-pixel sliver.
+                    let mut clipped_w = fill_w.min(bar_w);
+                    if clipped_w < bar_h {
+                        clipped_w = bar_h.min(bar_w);
+                    }
                     paint_pill(&mut pixmap, bar_x, bar_y, clipped_w, bar_h, cap, color);
                 }
             }
@@ -1592,15 +1607,19 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
         Color::from_hex("#1F1F1F")
     };
     let muted_color = if inputs.is_dark {
-        Color::from_hex("#888888")
+        Color::from_hex("#A8A8A8")
     } else {
-        Color::from_hex("#6E6E6E")
+        Color::from_hex("#5E5E5E")
     };
 
     let font_name = wide_str("Segoe UI");
     unsafe {
-        let big_font = create_font(layout.big_font_px, &font_name, FW_SEMIBOLD.0 as i32);
-        let small_font = create_font(layout.small_font_px, &font_name, FW_NORMAL.0 as i32);
+        // Big head percent uses FW_BOLD to anchor the eye against the ring.
+        // small_font is semibold because it carries both the "5H" window tag
+        // and the tail weekly-percent — both want a touch more weight than
+        // the countdown text rendered with main_font.
+        let big_font = create_font(layout.big_font_px, &font_name, FW_BOLD.0 as i32);
+        let small_font = create_font(layout.small_font_px, &font_name, FW_SEMIBOLD.0 as i32);
         let main_font = create_font(layout.main_font_px, &font_name, FW_NORMAL.0 as i32);
         SetBkMode(hdc, TRANSPARENT);
 
@@ -1615,13 +1634,13 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
         SetTextColor(hdc, COLORREF(muted_color.into_colorref()));
         let head_label_rect_w = layout.head_label_rect.right - layout.head_label_rect.left;
         let head_label_text: &str = if inputs.session_text.is_empty() {
-            "5h"
+            "5H"
         } else if measure_text_w(hdc, &inputs.session_text, layout.small_font_px)
             <= head_label_rect_w
         {
             inputs.session_text.as_str()
         } else {
-            "5h"
+            "5H"
         };
         draw_text_in_rect(hdc, &layout.head_label_rect, head_label_text, DT_CENTER);
 
@@ -1655,8 +1674,10 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
         }
 
         // Tail: weekly countdown aligned with its true remaining-time bar.
+        // Muted color — the percent above is the headline; the countdown is
+        // supporting context and should not compete for visual weight.
         SelectObject(hdc, main_font);
-        SetTextColor(hdc, COLORREF(text_color.into_colorref()));
+        SetTextColor(hdc, COLORREF(muted_color.into_colorref()));
         if !inputs.weekly_text.is_empty() {
             draw_tail_text_in_rect(hdc, &layout.tail_time_text_rect, &inputs.weekly_text, DT_RIGHT);
         }
