@@ -343,8 +343,10 @@ fn spawn_bubble(kind: ProviderId, settings: &Settings, is_dark: bool) {
         position: settings.bubble_positions.get(kind),
         session_pct: None,
         session_text: placeholder.clone(),
+        session_resets_at: None,
         weekly_pct: None,
         weekly_text: placeholder,
+        weekly_resets_at: None,
         is_dark,
     });
     if hwnd != HWND::default() {
@@ -640,12 +642,16 @@ fn propagate_to_ui() {
         let weekly_text = entry
             .map(|s| i18n::format_countdown(s.windows.secondary.resets_at, &snap.i18n_strings))
             .unwrap_or_default();
+        let session_resets_at = entry.and_then(|s| s.windows.primary.resets_at);
+        let weekly_resets_at = entry.and_then(|s| s.windows.secondary.resets_at);
         bubble::update_data(
             hwnd.to_hwnd(),
             session_pct,
             session_text,
+            session_resets_at,
             weekly_pct,
             weekly_text,
+            weekly_resets_at,
         );
     }
     refresh_tray_icons_with(&snap);

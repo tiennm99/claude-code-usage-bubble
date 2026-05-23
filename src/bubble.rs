@@ -2,8 +2,8 @@
 //
 // Top-level window with WS_POPUP + WS_EX_LAYERED + WS_EX_TOPMOST + WS_EX_NOACTIVATE.
 // The shape is a stadium (rounded-rect with corner_radius = height/2). The left
-// half is the "head" — a stroked progress ring around the 5h percentage glyph.
-// The right half is the "tail" — small "7d" label, thin progress bar, countdown.
+// half is the "head" — usage and remaining-time rings around the 5h percentage
+// glyph. The right half is the "tail" — weekly usage and remaining-time bars.
 //
 // Painting is hybrid: tiny-skia renders the shape (AA fills + AA stroked arc)
 // into a Pixmap; the Pixmap is copied byte-for-byte into a 32bpp BI_RGB DIB;
@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, SystemTime};
 
 use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use windows::core::PCWSTR;
@@ -32,7 +33,9 @@ use crate::os::{to_utf16_nul as wide_str, Rgb as Color};
 
 const TIMER_FULLSCREEN_CHECK: usize = 5;
 const TIMER_PULSE: usize = 6;
+const TIMER_TIME_PROGRESS: usize = 7;
 const PULSE_INTERVAL_MS: u32 = 80;
+const TIME_PROGRESS_INTERVAL_MS: u32 = 60_000;
 use crate::usage::ProviderId;
 
 // ---------- Public types & API ----------
@@ -52,6 +55,8 @@ const TASKBAR_GAP_LOGICAL: i32 = 4;
 const PEER_ALIGN_TOLERANCE_LOGICAL: i32 = 8;
 const CLASS_NAME: &str = "ClaudeCodeUsageBubble";
 const FULLSCREEN_POLL_MS: u32 = 1500;
+const FIVE_HOURS_SECS: u64 = 5 * 60 * 60;
+const SEVEN_DAYS_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// (num, den) such that bubble_height = (width * den) / num. 3:1 below 200,
 /// 2.8:1 below 280, 2.6:1 above — the bubble gets a touch taller as it
@@ -72,14 +77,41 @@ pub struct BubbleConfig {
     pub position: Option<(i32, i32)>,
     pub session_pct: Option<f64>,
     pub session_text: String,
+    pub session_resets_at: Option<SystemTime>,
     pub weekly_pct: Option<f64>,
     pub weekly_text: String,
+    pub weekly_resets_at: Option<SystemTime>,
     pub is_dark: bool,
 }
 
 fn bubble_height_logical(width_logical: i32) -> i32 {
     let (num, den) = aspect_at_width(width_logical);
     ((width_logical * den) / num).max(20)
+}
+
+#[derive(Clone, Copy)]
+enum UsageWindowKind {
+    Primary,
+    Secondary,
+}
+
+fn window_duration_secs(model: ProviderId, window: UsageWindowKind) -> u64 {
+    // Claude exposes 5h/7d directly. Codex exposes primary/secondary fields;
+    // the product maps those to the same short/long windows in the compact UI.
+    match (model, window) {
+        (ProviderId::Claude, UsageWindowKind::Primary) => FIVE_HOURS_SECS,
+        (ProviderId::Claude, UsageWindowKind::Secondary) => SEVEN_DAYS_SECS,
+        (ProviderId::ChatGpt, UsageWindowKind::Primary) => FIVE_HOURS_SECS,
+        (ProviderId::ChatGpt, UsageWindowKind::Secondary) => SEVEN_DAYS_SECS,
+    }
+}
+
+fn remaining_fraction(resets_at: Option<SystemTime>, duration_secs: u64) -> Option<f32> {
+    let reset = resets_at?;
+    let remaining = reset
+        .duration_since(SystemTime::now())
+        .unwrap_or_else(|_| Duration::from_secs(0));
+    Some((remaining.as_secs_f64() / duration_secs as f64).clamp(0.0, 1.0) as f32)
 }
 
 /// Owner-supplied event callbacks. The bubble window proc is a leaf — it
@@ -203,14 +235,17 @@ pub fn create(config: BubbleConfig) -> HWND {
             dpi,
             session_pct: config.session_pct,
             session_text: config.session_text,
+            session_resets_at: config.session_resets_at,
             weekly_pct: config.weekly_pct,
             weekly_text: config.weekly_text,
+            weekly_resets_at: config.weekly_resets_at,
             is_dark: config.is_dark,
             drag_start_pos: None,
             hidden_by_fullscreen: false,
             user_hidden: false,
             pulse_phase: 0,
             pulse_timer_armed: false,
+            time_progress_timer_armed: false,
         },
     );
 
@@ -238,6 +273,7 @@ pub fn destroy(hwnd: HWND) {
     unsafe {
         let _ = KillTimer(hwnd, TIMER_FULLSCREEN_CHECK);
         let _ = KillTimer(hwnd, TIMER_PULSE);
+        let _ = KillTimer(hwnd, TIMER_TIME_PROGRESS);
         let _ = DestroyWindow(hwnd);
     }
 }
@@ -273,8 +309,10 @@ pub fn update_data(
     hwnd: HWND,
     session_pct: Option<f64>,
     session_text: String,
+    session_resets_at: Option<SystemTime>,
     weekly_pct: Option<f64>,
     weekly_text: String,
+    weekly_resets_at: Option<SystemTime>,
 ) {
     {
         let mut bubbles = lock_bubbles();
@@ -283,10 +321,13 @@ pub fn update_data(
         };
         b.session_pct = session_pct;
         b.session_text = session_text;
+        b.session_resets_at = session_resets_at;
         b.weekly_pct = weekly_pct;
         b.weekly_text = weekly_text;
+        b.weekly_resets_at = weekly_resets_at;
     }
     sync_pulse_timer(hwnd);
+    sync_time_progress_timer(hwnd);
     render(hwnd);
 }
 
@@ -317,6 +358,32 @@ fn sync_pulse_timer(hwnd: HWND) {
         if !should_be_armed {
             b.pulse_phase = 0;
         }
+    }
+}
+
+fn sync_time_progress_timer(hwnd: HWND) {
+    let (should_be_armed, currently_armed) = {
+        let bubbles = lock_bubbles();
+        let Some(b) = bubbles.get(&(hwnd.0 as isize)) else {
+            return;
+        };
+        (
+            b.session_resets_at.is_some() || b.weekly_resets_at.is_some(),
+            b.time_progress_timer_armed,
+        )
+    };
+    if should_be_armed == currently_armed {
+        return;
+    }
+    unsafe {
+        if should_be_armed {
+            SetTimer(hwnd, TIMER_TIME_PROGRESS, TIME_PROGRESS_INTERVAL_MS, None);
+        } else {
+            let _ = KillTimer(hwnd, TIMER_TIME_PROGRESS);
+        }
+    }
+    if let Some(b) = lock_bubbles().get_mut(&(hwnd.0 as isize)) {
+        b.time_progress_timer_armed = should_be_armed;
     }
 }
 
@@ -381,8 +448,10 @@ struct BubbleState {
     dpi: u32,
     session_pct: Option<f64>,
     session_text: String,
+    session_resets_at: Option<SystemTime>,
     weekly_pct: Option<f64>,
     weekly_text: String,
+    weekly_resets_at: Option<SystemTime>,
     is_dark: bool,
     drag_start_pos: Option<(i32, i32)>,
     hidden_by_fullscreen: bool,
@@ -392,6 +461,8 @@ struct BubbleState {
     pulse_phase: u32,
     /// Whether TIMER_PULSE is currently armed for this bubble.
     pulse_timer_armed: bool,
+    /// Whether TIMER_TIME_PROGRESS is armed to keep reset-time visuals current.
+    time_progress_timer_armed: bool,
 }
 
 fn bubbles() -> &'static Mutex<HashMap<isize, BubbleState>> {
@@ -505,6 +576,7 @@ unsafe extern "system" fn wnd_proc(
                     }
                     render(hwnd);
                 }
+                w if w == TIMER_TIME_PROGRESS => render(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -961,7 +1033,7 @@ const COUNTDOWN_TEMPLATE: &str = "999시간";
 ///
 /// The outline is a stadium (rounded rect with `corner_radius = canvas_h / 2`).
 /// The left `head_diameter × canvas_h` square holds the 5h progress ring + big
-/// percent glyph. The rest is the tail: 7d label, thin bar, countdown.
+/// percent glyph. The rest is the tail: weekly usage lane + reset-time lane.
 struct BubbleLayout {
     canvas_w: i32,
     canvas_h: i32,
@@ -971,12 +1043,14 @@ struct BubbleLayout {
     ring_cy: f32,
     ring_radius: f32,
     ring_stroke_w: f32,
+    time_ring_radius: f32,
+    time_ring_stroke_w: f32,
     head_label_rect: RECT,
     head_pct_rect: RECT,
-    tail_label_rect: RECT,
-    tail_pct_rect: RECT,
-    tail_bar_rect: RECT,
-    tail_countdown_rect: RECT,
+    tail_usage_pct_rect: RECT,
+    tail_usage_bar_rect: RECT,
+    tail_time_text_rect: RECT,
+    tail_time_bar_rect: RECT,
     big_font_px: i32,
     small_font_px: i32,
     main_font_px: i32,
@@ -995,6 +1069,9 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     // inside the head padding. ring_radius is the centerline radius.
     let ring_outer = (head_diameter as f32) / 2.0 - (head_pad as f32);
     let ring_radius = ring_outer - ring_stroke_w / 2.0;
+    let time_ring_stroke_w = scale_to_dpi(2, dpi).clamp(1, 3) as f32;
+    let time_ring_radius =
+        (ring_radius - ring_stroke_w - scale_to_dpi(3, dpi) as f32).max(time_ring_stroke_w);
 
     let big_font_px = (head_diameter * 26 / 100).max(scale_to_dpi(11, dpi));
     let small_font_px = ((big_font_px * 55) / 100).max(scale_to_dpi(9, dpi));
@@ -1023,39 +1100,39 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let pad = scale_to_dpi(6, dpi);
 
     let countdown_w = measure_text_w(mem_dc, COUNTDOWN_TEMPLATE, main_font_px);
-    let label_w = measure_text_w(mem_dc, "7d", small_font_px);
     let pct_reserve_w = measure_text_w(mem_dc, "100%", small_font_px) + scale_to_dpi(2, dpi);
 
-    let tail_label_left = tail_left + pad;
-    let tail_label_right = tail_label_left + label_w;
-    let tail_countdown_right = tail_right;
-    let tail_countdown_left = tail_countdown_right - countdown_w;
+    let usage_bar_h = (height_px * 9 / 100).clamp(scale_to_dpi(5, dpi), scale_to_dpi(12, dpi));
+    let time_bar_h = (height_px * 5 / 100).clamp(scale_to_dpi(3, dpi), scale_to_dpi(7, dpi));
+    let lane_gap = scale_to_dpi(5, dpi);
+    let lanes_h = usage_bar_h + lane_gap + time_bar_h;
+    let usage_bar_top = (height_px - lanes_h) / 2;
+    let time_bar_top = usage_bar_top + usage_bar_h + lane_gap;
+    let time_text_h = main_font_px + scale_to_dpi(2, dpi);
+    let usage_pct_h = small_font_px + scale_to_dpi(2, dpi);
 
-    // Try to seat a 7d% text between the "7d" label and the bar. The %
-    // number is the actual data, so it takes precedence over keeping the
-    // bar at its pre-feature minimum: when the % shows, the bar may
-    // compress to `bar_min_with_pct` (still visible as a pill). Only when
-    // even that small bar wouldn't fit do we collapse the % rect entirely
-    // and restore the pre-feature `bar_min` to keep the bar readable.
-    // Without this two-tier threshold, the worst-case CJK countdown column
-    // ("999시간") leaves <20 logical of bar room at the default 200-logical
-    // size on both 100% and 125% DPI, and the % silently disappears.
-    let bar_min = scale_to_dpi(20, dpi);
-    let bar_min_with_pct = scale_to_dpi(8, dpi);
-    let (tail_pct_left, tail_pct_right, tail_bar_left, bar_render_min) = {
-        let pct_left = tail_label_right + pad;
-        let pct_right = pct_left + pct_reserve_w;
-        let bar_left = pct_right + pad;
-        if (tail_countdown_left - pad) - bar_left >= bar_min_with_pct {
-            (pct_left, pct_right, bar_left, bar_min_with_pct)
-        } else {
-            let bar_left = tail_label_right + pad;
-            (bar_left, bar_left, bar_left, bar_min)
-        }
+    let content_left = tail_left + pad;
+    let content_right = tail_right;
+    let content_w = (content_right - content_left).max(0);
+    let time_text_w = countdown_w.min(content_w);
+    let time_text_left = content_right - time_text_w;
+    let time_bar_min = scale_to_dpi(8, dpi);
+    let time_bar_right = (time_text_left - pad).max(content_left + time_bar_min);
+    let time_bar_left = content_left.min(time_bar_right);
+
+    let usage_bar_min = scale_to_dpi(8, dpi);
+    let show_usage_pct = content_w >= pct_reserve_w + pad + usage_bar_min;
+    let usage_pct_right = if show_usage_pct {
+        content_left + pct_reserve_w
+    } else {
+        content_left
     };
-    let tail_bar_right = (tail_countdown_left - pad).max(tail_bar_left + bar_render_min);
-    let tail_bar_h = (height_px * 9 / 100).clamp(scale_to_dpi(5, dpi), scale_to_dpi(12, dpi));
-    let tail_bar_top = (height_px - tail_bar_h) / 2;
+    let usage_bar_left = if show_usage_pct {
+        usage_pct_right + pad
+    } else {
+        content_left
+    };
+    let usage_bar_right = content_right.max(usage_bar_left + usage_bar_min);
 
     BubbleLayout {
         canvas_w: width_px,
@@ -1066,31 +1143,33 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
         ring_cy,
         ring_radius,
         ring_stroke_w,
+        time_ring_radius,
+        time_ring_stroke_w,
         head_label_rect,
         head_pct_rect,
-        tail_label_rect: RECT {
-            left: tail_label_left,
-            top: 0,
-            right: tail_label_right,
-            bottom: height_px,
+        tail_usage_pct_rect: RECT {
+            left: content_left,
+            top: usage_bar_top + (usage_bar_h - usage_pct_h) / 2,
+            right: usage_pct_right,
+            bottom: usage_bar_top + (usage_bar_h - usage_pct_h) / 2 + usage_pct_h,
         },
-        tail_pct_rect: RECT {
-            left: tail_pct_left,
-            top: 0,
-            right: tail_pct_right,
-            bottom: height_px,
+        tail_usage_bar_rect: RECT {
+            left: usage_bar_left,
+            top: usage_bar_top,
+            right: usage_bar_right,
+            bottom: usage_bar_top + usage_bar_h,
         },
-        tail_bar_rect: RECT {
-            left: tail_bar_left,
-            top: tail_bar_top,
-            right: tail_bar_right,
-            bottom: tail_bar_top + tail_bar_h,
+        tail_time_text_rect: RECT {
+            left: time_text_left,
+            top: time_bar_top + (time_bar_h - time_text_h) / 2,
+            right: content_right,
+            bottom: time_bar_top + (time_bar_h - time_text_h) / 2 + time_text_h,
         },
-        tail_countdown_rect: RECT {
-            left: tail_countdown_left,
-            top: 0,
-            right: tail_countdown_right,
-            bottom: height_px,
+        tail_time_bar_rect: RECT {
+            left: time_bar_left,
+            top: time_bar_top,
+            right: time_bar_right,
+            bottom: time_bar_top + time_bar_h,
         },
         big_font_px,
         small_font_px,
@@ -1114,6 +1193,16 @@ fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pi
         Color::from_hex("#3A3A3A")
     } else {
         Color::from_hex("#D6D6D6")
+    };
+    let time_track = if inputs.is_dark {
+        Color::from_hex("#303030")
+    } else {
+        Color::from_hex("#E0E0E0")
+    };
+    let time_fill = if inputs.is_dark {
+        Color::from_hex("#9A9A9A")
+    } else {
+        Color::from_hex("#777777")
     };
 
     // ---- Stadium background ----
@@ -1174,14 +1263,45 @@ fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pi
                 }
             }
         }
+
+        // Inner ring: true remaining time for the 5h/primary window. This
+        // stays neutral so it reads as time, not another quota alarm.
+        let mut paint = Paint::default();
+        paint.set_color(rgb_to_skia(time_track));
+        paint.anti_alias = true;
+        let mut stroke = Stroke::default();
+        stroke.width = layout.time_ring_stroke_w;
+        let mut pb = PathBuilder::new();
+        pb.push_circle(layout.ring_cx, layout.ring_cy, layout.time_ring_radius);
+        if let Some(p) = pb.finish() {
+            pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+        }
+        if let Some(frac) = remaining_fraction(
+            inputs.session_resets_at,
+            window_duration_secs(inputs.model, UsageWindowKind::Primary),
+        ) {
+            if frac > 0.0 {
+                let mut paint = Paint::default();
+                paint.set_color(rgb_to_skia(time_fill));
+                paint.anti_alias = true;
+                let mut stroke = Stroke::default();
+                stroke.width = layout.time_ring_stroke_w;
+                stroke.line_cap = LineCap::Round;
+                if let Some(path) =
+                    build_arc(layout.ring_cx, layout.ring_cy, layout.time_ring_radius, frac)
+                {
+                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                }
+            }
+        }
     }
 
-    // ---- Tail bar (7d) ----
+    // ---- Tail usage bar + reset-time bar ----
     {
-        let bar_x = layout.tail_bar_rect.left as f32;
-        let bar_y = layout.tail_bar_rect.top as f32;
-        let bar_w = (layout.tail_bar_rect.right - layout.tail_bar_rect.left) as f32;
-        let bar_h = (layout.tail_bar_rect.bottom - layout.tail_bar_rect.top) as f32;
+        let bar_x = layout.tail_usage_bar_rect.left as f32;
+        let bar_y = layout.tail_usage_bar_rect.top as f32;
+        let bar_w = (layout.tail_usage_bar_rect.right - layout.tail_usage_bar_rect.left) as f32;
+        let bar_h = (layout.tail_usage_bar_rect.bottom - layout.tail_usage_bar_rect.top) as f32;
         let cap = bar_h * 0.5;
         if bar_w > 0.0 && bar_h > 0.0 {
             paint_pill(&mut pixmap, bar_x, bar_y, bar_w, bar_h, cap, track);
@@ -1200,13 +1320,31 @@ fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pi
                 }
             }
         }
+
+        let bar_x = layout.tail_time_bar_rect.left as f32;
+        let bar_y = layout.tail_time_bar_rect.top as f32;
+        let bar_w = (layout.tail_time_bar_rect.right - layout.tail_time_bar_rect.left) as f32;
+        let bar_h = (layout.tail_time_bar_rect.bottom - layout.tail_time_bar_rect.top) as f32;
+        let cap = bar_h * 0.5;
+        if bar_w > 0.0 && bar_h > 0.0 {
+            paint_pill(&mut pixmap, bar_x, bar_y, bar_w, bar_h, cap, time_track);
+            if let Some(frac) = remaining_fraction(
+                inputs.weekly_resets_at,
+                window_duration_secs(inputs.model, UsageWindowKind::Secondary),
+            ) {
+                let fill_w = bar_w * frac;
+                if fill_w > 0.0 {
+                    paint_pill(&mut pixmap, bar_x, bar_y, fill_w.min(bar_w), bar_h, cap, time_fill);
+                }
+            }
+        }
     }
 
     Some(pixmap)
 }
 
 /// Fill a horizontal pill at `(x, y, w, h)` with circular end caps of radius
-/// `cap`. Used for both the track and the fill of the tail's 7d bar.
+/// `cap`. Used for both track and fill segments in the tail bars.
 fn paint_pill(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, cap: f32, color: Color) {
     let mut paint = Paint::default();
     paint.set_color(rgb_to_skia(color));
@@ -1310,8 +1448,10 @@ struct PaintInputs {
     model: ProviderId,
     session_pct: Option<f64>,
     session_text: String,
+    session_resets_at: Option<SystemTime>,
     weekly_pct: Option<f64>,
     weekly_text: String,
+    weekly_resets_at: Option<SystemTime>,
     is_dark: bool,
     pulse_phase: u32,
 }
@@ -1329,8 +1469,10 @@ fn render(hwnd: HWND) {
                 model: b.model,
                 session_pct: b.session_pct,
                 session_text: b.session_text.clone(),
+                session_resets_at: b.session_resets_at,
                 weekly_pct: b.weekly_pct,
                 weekly_text: b.weekly_text.clone(),
+                weekly_resets_at: b.weekly_resets_at,
                 is_dark: b.is_dark,
                 pulse_phase: b.pulse_phase,
             },
@@ -1450,8 +1592,8 @@ fn brighten(c: Color, t: f64) -> Color {
     )
 }
 
-/// Paint the new bubble's text overlay via GDI: small "5h" label + big "%"
-/// glyph in the head, small "7d" label + countdown on the tail.
+/// Paint the bubble's text overlay via GDI: primary countdown + big "%"
+/// glyph in the head, weekly percent + weekly countdown on the tail.
 fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
     let text_color = if inputs.is_dark {
         Color::from_hex("#EAEAEA")
@@ -1501,19 +1643,15 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
         };
         draw_text_in_rect(hdc, &layout.head_pct_rect, &pct_text, DT_CENTER);
 
-        // Tail: "7d" label (muted, left-aligned).
-        SelectObject(hdc, small_font);
-        SetTextColor(hdc, COLORREF(muted_color.into_colorref()));
-        draw_text_in_rect(hdc, &layout.tail_label_rect, "7d", DT_LEFT);
-
-        // Tail: 7d percent (foreground color, between label and bar). Skipped
+        // Tail: weekly percent (foreground color, aligned with its usage bar). Skipped
         // when the layout collapsed the rect at small widths. Foreground —
         // not the accent color the bar uses — because Codex teal #10A37F on
         // the light theme background only hits ~3.2:1 contrast, below WCAG
         // AA for small text. Adjacency to the bar carries the visual
         // grouping; we don't need hue to do it too.
+        SelectObject(hdc, small_font);
         if let Some(pct) = inputs.weekly_pct {
-            if layout.tail_pct_rect.right > layout.tail_pct_rect.left {
+            if layout.tail_usage_pct_rect.right > layout.tail_usage_pct_rect.left {
                 let mut color = text_color;
                 if pct >= 95.0 {
                     let t = pulse_triangle(inputs.pulse_phase);
@@ -1521,20 +1659,15 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
                 }
                 SetTextColor(hdc, COLORREF(color.into_colorref()));
                 let weekly_pct_text = format!("{:.0}%", pct);
-                draw_text_in_rect(hdc, &layout.tail_pct_rect, &weekly_pct_text, DT_CENTER);
+                draw_text_in_rect(hdc, &layout.tail_usage_pct_rect, &weekly_pct_text, DT_CENTER);
             }
         }
 
-        // Tail: countdown (right-aligned).
+        // Tail: weekly countdown aligned with its true remaining-time bar.
         SelectObject(hdc, main_font);
         SetTextColor(hdc, COLORREF(text_color.into_colorref()));
         if !inputs.weekly_text.is_empty() {
-            draw_text_in_rect(
-                hdc,
-                &layout.tail_countdown_rect,
-                &inputs.weekly_text,
-                DT_RIGHT,
-            );
+            draw_text_in_rect(hdc, &layout.tail_time_text_rect, &inputs.weekly_text, DT_RIGHT);
         }
 
         SelectObject(hdc, prev_font);
