@@ -6,7 +6,6 @@ use windows::Win32::Graphics::Gdi::{MonitorFromRect, MONITOR_DEFAULTTONULL};
 
 use crate::bubble::DEFAULT_BUBBLE_SIZE;
 use crate::usage::ProviderId;
-type TrayIconKind = ProviderId;
 
 // 140px matches MIN_BUBBLE_SIZE — a saved top-left a few px past the work-area
 // edge still passes the validator, but a position fully on a disconnected
@@ -52,19 +51,19 @@ pub struct BubblePositions {
 }
 
 impl BubblePositions {
-    pub fn get(&self, model: TrayIconKind) -> Option<(i32, i32)> {
+    pub fn get(&self, model: ProviderId) -> Option<(i32, i32)> {
         match model {
             ProviderId::Claude => self.claude,
             ProviderId::ChatGpt => self.codex,
         }
     }
-    pub fn set(&mut self, model: TrayIconKind, pos: (i32, i32)) {
+    pub fn set(&mut self, model: ProviderId, pos: (i32, i32)) {
         match model {
             ProviderId::Claude => self.claude = Some(pos),
             ProviderId::ChatGpt => self.codex = Some(pos),
         }
     }
-    pub fn reset(&mut self, model: TrayIconKind) {
+    pub fn reset(&mut self, model: ProviderId) {
         match model {
             ProviderId::Claude => self.claude = None,
             ProviderId::ChatGpt => self.codex = None,

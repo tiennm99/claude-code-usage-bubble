@@ -27,9 +27,7 @@ use crate::net;
 use crate::os;
 use crate::panel::{self, PanelData};
 use crate::settings::{self, Settings, POLL_15_MIN, POLL_1_HOUR, POLL_1_MIN, POLL_5_MIN};
-use crate::tray::{self, TrayAction, TrayIcon as TrayIconData};
-use crate::usage::ProviderId as TrayIconKind;
-use crate::tray::WM_APP_TRAY;
+use crate::tray::{self, TrayAction, TrayIcon as TrayIconData, WM_APP_TRAY};
 use crate::update::{self, Channel as InstallChannel, CheckOutcome};
 use crate::usage::{self, ProviderId, Registry, UsageWindows};
 
@@ -110,7 +108,7 @@ enum UpdateStatus {
 
 struct AppState {
     msg_hwnd: SendHwnd,
-    bubbles: HashMap<TrayIconKind, SendHwnd>,
+    bubbles: HashMap<ProviderId, SendHwnd>,
     settings: Settings,
     i18n: I18n,
     is_dark: bool,
@@ -143,6 +141,21 @@ fn state() -> &'static Mutex<Option<AppState>> {
 
 fn lock_state() -> MutexGuard<'static, Option<AppState>> {
     state().lock().expect("app state mutex poisoned")
+}
+
+/// Run `f` with mutable access to `AppState`, then snapshot `Settings` and
+/// persist it to disk. The lock is released before the disk write so the UI
+/// thread doesn't block on I/O. No-op if state hasn't been initialised yet.
+fn update_settings(f: impl FnOnce(&mut AppState)) {
+    let snap = {
+        let mut guard = lock_state();
+        let Some(s) = guard.as_mut() else {
+            return;
+        };
+        f(s);
+        s.settings.clone()
+    };
+    settings::save(&snap);
 }
 
 // ---------- Entry ----------
@@ -230,6 +243,15 @@ pub fn run(args: crate::AppArgs) {
         last_balloon_at: None,
     });
 
+    bubble::install_callbacks(bubble::Callbacks {
+        on_click: on_bubble_click,
+        on_right_click: on_bubble_right_click,
+        on_moved: on_bubble_moved,
+        on_resized: on_bubble_resized,
+        on_menu_command,
+        on_settings_changed: recheck_theme,
+    });
+
     create_initial_bubbles();
     refresh_tray_icons();
 
@@ -307,7 +329,7 @@ fn create_initial_bubbles() {
     }
 }
 
-fn spawn_bubble(kind: TrayIconKind, settings: &Settings, is_dark: bool) {
+fn spawn_bubble(kind: ProviderId, settings: &Settings, is_dark: bool) {
     // "…" matches the in-flight/transient-error placeholder used by
     // `apply_results`, so the bubble has visible feedback during the first
     // poll rather than rendering with two empty grey tracks.
@@ -365,40 +387,24 @@ unsafe extern "system" fn msg_wnd_proc(
 
 // ---------- Bubble callbacks ----------
 
-pub fn on_bubble_click(hwnd: HWND, model: TrayIconKind) {
+fn on_bubble_click(hwnd: HWND, model: ProviderId) {
     let data = build_panel_data(model);
     panel::toggle(data, hwnd);
 }
 
-pub fn on_bubble_right_click(hwnd: HWND, _model: TrayIconKind, _pt: POINT) {
+fn on_bubble_right_click(hwnd: HWND, _model: ProviderId, _pt: POINT) {
     show_context_menu(hwnd);
 }
 
-pub fn on_bubble_moved(model: TrayIconKind, pos: (i32, i32)) {
-    let snap = {
-        let mut s = lock_state();
-        let Some(s) = s.as_mut() else {
-            return;
-        };
-        s.settings.bubble_positions.set(model, pos);
-        s.settings.clone()
-    };
-    settings::save(&snap);
+fn on_bubble_moved(model: ProviderId, pos: (i32, i32)) {
+    update_settings(|s| s.settings.bubble_positions.set(model, pos));
 }
 
-pub fn on_bubble_resized(_model: TrayIconKind, size_logical: i32) {
-    let snap = {
-        let mut s = lock_state();
-        let Some(s) = s.as_mut() else {
-            return;
-        };
-        s.settings.bubble_size_logical = size_logical;
-        s.settings.clone()
-    };
-    settings::save(&snap);
+fn on_bubble_resized(_model: ProviderId, size_logical: i32) {
+    update_settings(|s| s.settings.bubble_size_logical = size_logical);
 }
 
-pub fn on_menu_command(id: u32, _owner_hwnd: HWND) {
+fn on_menu_command(id: u32, _owner_hwnd: HWND) {
     let id = (id & 0xFFFF) as u16;
     match id {
         IDM_REFRESH => spawn_poll_thread(),
@@ -618,8 +624,7 @@ fn propagate_to_ui() {
     };
 
     for (kind, hwnd) in snap.bubbles.iter() {
-        let id = kind_to_provider(*kind);
-        let entry = snap.snapshots.get(&id);
+        let entry = snap.snapshots.get(kind);
         let session_pct = entry.map(|s| s.windows.primary.utilization);
         let weekly_pct = entry.map(|s| s.windows.secondary.utilization);
         // The bubble paints the percent inline inside the bar fill, so it
@@ -643,8 +648,7 @@ fn propagate_to_ui() {
 
     if panel::is_visible() {
         if let Some(model) = panel::current_model() {
-            let id = kind_to_provider(model);
-            if let Some(provider_state) = snap.snapshots.get(&id) {
+            if let Some(provider_state) = snap.snapshots.get(&model) {
                 panel::refresh_data(build_panel_data_from(&snap, model, provider_state));
             }
         }
@@ -654,7 +658,7 @@ fn propagate_to_ui() {
 
 #[derive(Clone)]
 struct UiSnapshot {
-    bubbles: HashMap<TrayIconKind, SendHwnd>,
+    bubbles: HashMap<ProviderId, SendHwnd>,
     snapshots: HashMap<ProviderId, ProviderUiState>,
     settings: Settings,
     i18n_strings: LocaleStrings,
@@ -663,21 +667,13 @@ struct UiSnapshot {
     last_poll_ok: bool,
 }
 
-fn kind_to_provider(k: TrayIconKind) -> ProviderId {
-    match k {
-        ProviderId::Claude => ProviderId::Claude,
-        ProviderId::ChatGpt => ProviderId::ChatGpt,
-    }
-}
-
-fn build_panel_data(model: TrayIconKind) -> PanelData {
+fn build_panel_data(model: ProviderId) -> PanelData {
     let s = lock_state();
     let Some(s) = s.as_ref() else {
         return placeholder_panel(model);
     };
-    let id = kind_to_provider(model);
     let strings = s.i18n.strings().clone();
-    let provider_state = s.snapshots.get(&id).cloned().unwrap_or_default();
+    let provider_state = s.snapshots.get(&model).cloned().unwrap_or_default();
     PanelData {
         model,
         session_pct: provider_state.windows.primary.utilization,
@@ -689,7 +685,7 @@ fn build_panel_data(model: TrayIconKind) -> PanelData {
     }
 }
 
-fn build_panel_data_from(snap: &UiSnapshot, model: TrayIconKind, p: &ProviderUiState) -> PanelData {
+fn build_panel_data_from(snap: &UiSnapshot, model: ProviderId, p: &ProviderUiState) -> PanelData {
     PanelData {
         model,
         session_pct: p.windows.primary.utilization,
@@ -701,7 +697,7 @@ fn build_panel_data_from(snap: &UiSnapshot, model: TrayIconKind, p: &ProviderUiS
     }
 }
 
-fn placeholder_panel(model: TrayIconKind) -> PanelData {
+fn placeholder_panel(model: ProviderId) -> PanelData {
     let strings = i18n::I18n::load(None).strings().clone();
     PanelData {
         model,
@@ -816,7 +812,7 @@ fn handle_tray_action(action: TrayAction) {
 /// the UI. Called from each bubble's WM_SETTINGCHANGE handler — Windows
 /// posts that to every top-level window when the user toggles light/dark
 /// in Settings, so this naturally fires once per change.
-pub fn recheck_theme() {
+fn recheck_theme() {
     let now_dark = os::theme::is_dark();
     let changed = {
         let mut s = lock_state();
@@ -1161,7 +1157,7 @@ fn set_poll_interval(ms: u32) {
     }
 }
 
-fn toggle_model(model: TrayIconKind) {
+fn toggle_model(model: ProviderId) {
     let (settings, is_dark) = {
         let mut s = lock_state();
         let Some(s) = s.as_mut() else {
@@ -1249,33 +1245,21 @@ fn reset_positions() {
 }
 
 fn set_language(_dummy: Option<()>) {
-    let snap = {
-        let mut s = lock_state();
-        let Some(s) = s.as_mut() else {
-            return;
-        };
+    update_settings(|s| {
         s.i18n.set_active(None);
         s.settings.language = None;
-        s.settings.clone()
-    };
-    settings::save(&snap);
+    });
     propagate_to_ui();
 }
 
 fn set_language_by_index(idx: usize) {
-    let snap = {
-        let mut s = lock_state();
-        let Some(s) = s.as_mut() else {
-            return;
-        };
+    update_settings(|s| {
         let code = s.i18n.available().nth(idx).map(|(c, _)| c.to_string());
         if let Some(c) = code.as_deref() {
             s.i18n.set_active(Some(c));
         }
         s.settings.language = code;
-        s.settings.clone()
-    };
-    settings::save(&snap);
+    });
     propagate_to_ui();
 }
 

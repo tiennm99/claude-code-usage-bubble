@@ -84,7 +84,7 @@ fn envelope_to_windows(envelope: Envelope) -> Option<UsageWindows> {
 
 fn window_from(w: ApiWindow) -> Window {
     Window {
-        utilization: w.used_percent,
+        utilization: w.used_percent.clamp(0.0, 100.0),
         resets_at: unix_to_systemtime(Some(w.reset_at)),
     }
 }

@@ -133,7 +133,7 @@ fn try_messages_endpoint(http: &Client, token: &str) -> Result<UsageWindows, Err
 
 fn bucket_to_window(bucket: Bucket) -> Window {
     Window {
-        utilization: bucket.utilization,
+        utilization: bucket.utilization.clamp(0.0, 100.0),
         resets_at: bucket.resets_at.as_deref().and_then(parse_iso8601),
     }
 }
@@ -163,18 +163,21 @@ fn token_is_expired(expires_at_unix_ms: Option<i64>) -> bool {
     now_ms >= exp_ms
 }
 
-// --- ISO 8601 parsing (minimal — handles "YYYY-MM-DDTHH:MM:SS[.frac][Z|+00:00]") ---
+// --- ISO 8601 parsing (minimal — handles "YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM]") ---
 
 fn parse_iso8601(s: &str) -> Option<SystemTime> {
-    let trimmed = s.split('Z').next().unwrap_or(s);
-    let trimmed = trimmed.split('+').next().unwrap_or(trimmed);
-    let trimmed = trimmed.split('-').take(3).collect::<Vec<_>>().join("-");
-    // We want the original `s` for parsing time-part. Re-split on 'T'.
-    let (date, time) = s
-        .split_once('T')
-        .map(|(d, t)| (d, t))
-        .or_else(|| Some(("", "")))?;
-    let _ = trimmed; // shadow; using the raw `date` + `time` below.
+    let (date, time_with_offset) = s.split_once('T')?;
+
+    // Split the time-and-offset on the first 'Z' / '+' / '-' marker.
+    let offset_pos = time_with_offset
+        .char_indices()
+        .find(|(_, c)| matches!(c, 'Z' | '+' | '-'))
+        .map(|(i, _)| i);
+    let (time, offset_str) = match offset_pos {
+        Some(p) => (&time_with_offset[..p], &time_with_offset[p..]),
+        None => (time_with_offset, ""),
+    };
+    let time = time.split_once('.').map_or(time, |(t, _)| t);
 
     let date_parts: Vec<&str> = date.split('-').collect();
     if date_parts.len() != 3 {
@@ -183,13 +186,16 @@ fn parse_iso8601(s: &str) -> Option<SystemTime> {
     let y: u64 = date_parts[0].parse().ok()?;
     let mo: u64 = date_parts[1].parse().ok()?;
     let d: u64 = date_parts[2].parse().ok()?;
+    if y < 1970 || mo == 0 || mo > 12 || d == 0 {
+        return None;
+    }
+    const DAYS_IN_MONTH: [u64; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let max_day = DAYS_IN_MONTH[mo as usize] + if mo == 2 && is_leap(y) { 1 } else { 0 };
+    if d > max_day {
+        return None;
+    }
 
-    let time_no_offset = time
-        .split(|c| c == 'Z' || c == '+' || (c == '-' && time.find(c) != Some(0)))
-        .next()
-        .unwrap_or(time);
-    let time_no_frac = time_no_offset.split('.').next().unwrap_or(time_no_offset);
-    let time_parts: Vec<&str> = time_no_frac.split(':').collect();
+    let time_parts: Vec<&str> = time.split(':').collect();
     if time_parts.len() != 3 {
         return None;
     }
@@ -197,11 +203,26 @@ fn parse_iso8601(s: &str) -> Option<SystemTime> {
     let mi: u64 = time_parts[1].parse().ok()?;
     let se: u64 = time_parts[2].parse().ok()?;
 
+    let offset_minutes: i64 = if offset_str.is_empty() || offset_str == "Z" {
+        0
+    } else {
+        let sign: i64 = if offset_str.starts_with('+') {
+            1
+        } else if offset_str.starts_with('-') {
+            -1
+        } else {
+            return None;
+        };
+        let (oh_str, om_str) = offset_str[1..].split_once(':')?;
+        let oh: i64 = oh_str.parse().ok()?;
+        let om: i64 = om_str.parse().ok()?;
+        sign * (oh * 60 + om)
+    };
+
     let mut days: u64 = 0;
     for year in 1970..y {
         days += if is_leap(year) { 366 } else { 365 };
     }
-    const DAYS_IN_MONTH: [u64; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     for month in 1..mo {
         days += DAYS_IN_MONTH[month as usize];
         if month == 2 && is_leap(y) {
@@ -209,8 +230,13 @@ fn parse_iso8601(s: &str) -> Option<SystemTime> {
         }
     }
     days += d - 1;
-    let secs = days * 86_400 + h * 3_600 + mi * 60 + se;
-    Some(UNIX_EPOCH + Duration::from_secs(secs))
+
+    let local_secs = days * 86_400 + h * 3_600 + mi * 60 + se;
+    let utc_secs = (local_secs as i64) - offset_minutes * 60;
+    if utc_secs < 0 {
+        return None;
+    }
+    Some(UNIX_EPOCH + Duration::from_secs(utc_secs as u64))
 }
 
 fn is_leap(year: u64) -> bool {

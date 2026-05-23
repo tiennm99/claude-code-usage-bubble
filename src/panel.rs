@@ -16,9 +16,9 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::i18n::LocaleStrings;
+use crate::os::dpi::scale as scale_to_dpi;
 use crate::os::{to_utf16_nul as wide_str, Rgb as Color};
 use crate::usage::ProviderId;
-type TrayIconKind = ProviderId;
 
 const CLASS_NAME: &str = "ClaudeCodeUsageBubblePanel";
 const PANEL_W_LOGICAL: i32 = 280;
@@ -30,7 +30,7 @@ const RIGHT_TEXT_W_LOGICAL: i32 = 96;
 const BAR_HEIGHT_LOGICAL: i32 = 14;
 
 pub struct PanelData {
-    pub model: TrayIconKind,
+    pub model: ProviderId,
     pub session_pct: f64,
     pub session_text: String,
     pub weekly_pct: f64,
@@ -86,7 +86,7 @@ pub fn is_visible() -> bool {
         .unwrap_or(false)
 }
 
-pub fn current_model() -> Option<TrayIconKind> {
+pub fn current_model() -> Option<ProviderId> {
     lock_state().as_ref().map(|p| p.data.model)
 }
 
@@ -291,8 +291,10 @@ fn paint(hwnd: HWND, hdc: HDC) {
     } else {
         Color::from_hex("#D6D6D6")
     };
-    let session_accent = bar_color_for(data.model, data.session_pct, data.is_dark);
-    let weekly_accent = bar_color_for(data.model, data.weekly_pct, data.is_dark);
+    let session_accent =
+        crate::usage_color::bar_fill_color(data.model, data.is_dark, data.session_pct);
+    let weekly_accent =
+        crate::usage_color::bar_fill_color(data.model, data.is_dark, data.weekly_pct);
 
     unsafe {
         let bg_brush = CreateSolidBrush(COLORREF(bg.into_colorref()));
@@ -498,10 +500,6 @@ fn draw_text(
     }
 }
 
-fn bar_color_for(model: ProviderId, percent: f64, is_dark: bool) -> Color {
-    crate::usage_color::bar_fill_color(model, is_dark, percent)
-}
-
 fn clone_data() -> Option<PanelData> {
     let guard = lock_state();
     let p = guard.as_ref()?;
@@ -543,8 +541,4 @@ fn place_near(anchor: RECT, panel_w: i32, panel_h: i32) -> (i32, i32) {
         x = vx + 8;
     }
     (x, y)
-}
-
-fn scale_to_dpi(logical: i32, dpi: u32) -> i32 {
-    ((logical as i64) * (dpi as i64) / 96) as i32
 }

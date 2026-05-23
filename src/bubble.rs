@@ -26,13 +26,13 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::os::dpi::scale as scale_to_dpi;
 use crate::os::{to_utf16_nul as wide_str, Rgb as Color};
 
 const TIMER_FULLSCREEN_CHECK: usize = 5;
 const TIMER_PULSE: usize = 6;
 const PULSE_INTERVAL_MS: u32 = 80;
 use crate::usage::ProviderId;
-type TrayIconKind = ProviderId;
 
 // ---------- Public types & API ----------
 
@@ -88,7 +88,7 @@ fn aspect_at_width(w_logical: i32) -> (i32, i32) {
 }
 
 pub struct BubbleConfig {
-    pub model: TrayIconKind,
+    pub model: ProviderId,
     pub size_logical: i32,
     pub position: Option<(i32, i32)>,
     pub session_pct: Option<f64>,
@@ -101,6 +101,34 @@ pub struct BubbleConfig {
 fn bubble_height_logical(width_logical: i32) -> i32 {
     let (num, den) = aspect_at_width(width_logical);
     ((width_logical * den) / num).max(20)
+}
+
+/// Owner-supplied event callbacks. The bubble window proc is a leaf — it
+/// doesn't know about `app`. The owner installs these once at startup so the
+/// proc can dispatch UI events back without an upward `crate::app::` reach.
+pub struct Callbacks {
+    pub on_click: fn(HWND, ProviderId),
+    pub on_right_click: fn(HWND, ProviderId, POINT),
+    pub on_moved: fn(ProviderId, (i32, i32)),
+    pub on_resized: fn(ProviderId, i32),
+    pub on_menu_command: fn(u32, HWND),
+    pub on_settings_changed: fn(),
+}
+
+static CALLBACKS: OnceLock<Callbacks> = OnceLock::new();
+
+/// Install the owner's callbacks. Called once by `app::run` before any
+/// bubble is created. Subsequent calls are silently ignored.
+pub fn install_callbacks(cb: Callbacks) {
+    let _ = CALLBACKS.set(cb);
+}
+
+fn dispatch<F: FnOnce(&Callbacks)>(f: F) {
+    if let Some(cb) = CALLBACKS.get() {
+        f(cb);
+    } else {
+        log::warn!("bubble event dispatched before install_callbacks; event dropped");
+    }
 }
 
 /// Register the bubble window class. Idempotent; safe to call before the first
@@ -133,7 +161,7 @@ pub fn create(config: BubbleConfig) -> HWND {
     let initial_size_logical = config
         .size_logical
         .clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
-    let dpi_for_create = primary_dpi();
+    let dpi_for_create = crate::os::dpi::for_system();
     let width_px = scale_to_dpi(initial_size_logical, dpi_for_create);
     let height_px = scale_to_dpi(bubble_height_logical(initial_size_logical), dpi_for_create);
     let (x, y) = config
@@ -166,19 +194,11 @@ pub fn create(config: BubbleConfig) -> HWND {
     }
 
     // Embed app icon in window non-client (mostly cosmetic; toolwindows
-    // don't show captions but the icon helps in dev tooling).
+    // don't show captions but the icon helps in dev tooling). The HICONs
+    // are extracted once at process startup and reused across every bubble
+    // create() so we don't leak a pair per toggle cycle.
+    let (large_icon, small_icon) = app_icons();
     unsafe {
-        let mut large_icon = HICON::default();
-        let mut small_icon = HICON::default();
-        let mut exe = [0u16; 260];
-        GetModuleFileNameW(HMODULE::default(), &mut exe);
-        let _ = ExtractIconExW(
-            PCWSTR::from_raw(exe.as_ptr()),
-            0,
-            Some(&mut large_icon),
-            Some(&mut small_icon),
-            1,
-        );
         if !large_icon.is_invalid() {
             let _ = SendMessageW(
                 hwnd,
@@ -243,6 +263,33 @@ pub fn destroy(hwnd: HWND) {
         let _ = KillTimer(hwnd, TIMER_PULSE);
         let _ = DestroyWindow(hwnd);
     }
+}
+
+/// Extract the EXE's own icon pair once per process. Stored as raw pointer
+/// values because `HICON` is `!Send`/`!Sync`; reconstituted for each caller.
+/// The pair is intentionally never destroyed — Windows tears them down on
+/// process exit, and one pair per process is bounded leak rather than the
+/// O(bubble-toggles) leak we'd get from extracting per `create()`.
+fn app_icons() -> (HICON, HICON) {
+    static ICONS: OnceLock<(isize, isize)> = OnceLock::new();
+    let (big, small) = *ICONS.get_or_init(|| unsafe {
+        let mut large = HICON::default();
+        let mut small = HICON::default();
+        let mut exe = [0u16; 260];
+        GetModuleFileNameW(HMODULE::default(), &mut exe);
+        let _ = ExtractIconExW(
+            PCWSTR::from_raw(exe.as_ptr()),
+            0,
+            Some(&mut large),
+            Some(&mut small),
+            1,
+        );
+        if large.is_invalid() && small.is_invalid() {
+            log::warn!("ExtractIconExW yielded null handles; bubbles will be iconless");
+        }
+        (large.0 as isize, small.0 as isize)
+    });
+    (HICON(big as *mut _), HICON(small as *mut _))
 }
 
 pub fn update_data(
@@ -339,7 +386,7 @@ pub fn position(hwnd: HWND) -> Option<(i32, i32)> {
     Some((r.left, r.top))
 }
 
-pub fn model(hwnd: HWND) -> Option<TrayIconKind> {
+pub fn model(hwnd: HWND) -> Option<ProviderId> {
     lock_bubbles()
         .get(&(hwnd.0 as isize))
         .map(|b| b.model)
@@ -354,7 +401,7 @@ pub fn size_logical(hwnd: HWND) -> Option<i32> {
 // ---------- State ----------
 
 struct BubbleState {
-    model: TrayIconKind,
+    model: ProviderId,
     size_logical: i32,
     dpi: u32,
     session_pct: Option<f64>,
@@ -422,18 +469,18 @@ unsafe extern "system" fn wnd_proc(
                 snap_to_edge(hwnd);
                 if let Some(model) = model(hwnd) {
                     if let Some(pos) = position(hwnd) {
-                        crate::app::on_bubble_moved(model, pos);
+                        dispatch(|cb| (cb.on_moved)(model, pos));
                     }
                 }
             } else if let Some(model) = model(hwnd) {
-                crate::app::on_bubble_click(hwnd, model);
+                dispatch(|cb| (cb.on_click)(hwnd, model));
             }
             LRESULT(0)
         }
         WM_NCRBUTTONUP => {
             if let Some(model) = model(hwnd) {
                 let pt = lparam_to_point(lparam);
-                crate::app::on_bubble_right_click(hwnd, model, pt);
+                dispatch(|cb| (cb.on_right_click)(hwnd, model, pt));
             }
             LRESULT(0)
         }
@@ -484,7 +531,7 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_COMMAND => {
-            crate::app::on_menu_command(wparam.0 as u32, hwnd);
+            dispatch(|cb| (cb.on_menu_command)(wparam.0 as u32, hwnd));
             LRESULT(0)
         }
         WM_SETTINGCHANGE => {
@@ -494,7 +541,7 @@ unsafe extern "system" fn wnd_proc(
             // the app to re-read the light/dark setting — Windows fires
             // this message when the user flips the OS theme in Settings.
             clamp_into_work_area(hwnd);
-            crate::app::recheck_theme();
+            dispatch(|cb| (cb.on_settings_changed)());
             LRESULT(0)
         }
         WM_DESTROY => {
@@ -591,7 +638,7 @@ fn resize_step(hwnd: HWND, delta: i32) {
     }
     render(hwnd);
     if let Some(m) = model(hwnd) {
-        crate::app::on_bubble_resized(m, new_logical);
+        dispatch(|cb| (cb.on_resized)(m, new_logical));
     }
 }
 
@@ -810,7 +857,7 @@ fn clamp_into_work_area(hwnd: HWND) {
     // so they don't visually stack.
     let is_codex = lock_bubbles()
         .get(&(hwnd.0 as isize))
-        .is_some_and(|b| matches!(b.model, TrayIconKind::ChatGpt));
+        .is_some_and(|b| matches!(b.model, ProviderId::ChatGpt));
     if is_codex && nx == wa.right - w && ny == wa.bottom - h {
         const STAGGER_GAP: i32 = 24;
         ny = (ny - h - STAGGER_GAP).max(wa.top);
@@ -1060,7 +1107,7 @@ fn rgb_to_dib(c: Color) -> u32 {
 }
 
 struct PaintInputs {
-    model: TrayIconKind,
+    model: ProviderId,
     session_pct: Option<f64>,
     session_text: String,
     weekly_pct: Option<f64>,
@@ -1092,7 +1139,14 @@ fn render(hwnd: HWND) {
 
     unsafe {
         let screen_dc = GetDC(hwnd);
+        if screen_dc.is_invalid() {
+            return;
+        }
         let mem_dc = CreateCompatibleDC(screen_dc);
+        if mem_dc.is_invalid() {
+            ReleaseDC(hwnd, screen_dc);
+            return;
+        }
         let layout = compute_layout(size_logical, dpi, mem_dc);
 
         let bmi = BITMAPINFO {
@@ -1204,7 +1258,7 @@ fn row_band(layout: &BarLayout, row_top: i32) -> (i32, i32) {
     (top, bot)
 }
 
-fn paint_accent_stripe(pixels: &mut [u32], layout: &BarLayout, model: TrayIconKind, is_dark: bool) {
+fn paint_accent_stripe(pixels: &mut [u32], layout: &BarLayout, model: ProviderId, is_dark: bool) {
     let stripe = rgb_to_dib(crate::usage_color::accent_color_for(model, is_dark));
     for y in 0..layout.canvas_h {
         for x in 0..layout.accent_right {
@@ -1460,15 +1514,7 @@ fn use_dark_text_over(c: Color) -> bool {
 
 // ---------- Helpers ----------
 
-fn primary_dpi() -> u32 {
-    unsafe { GetDpiForSystem().max(96) }
-}
-
-fn scale_to_dpi(logical: i32, dpi: u32) -> i32 {
-    ((logical as i64) * (dpi as i64) / 96) as i32
-}
-
-fn default_position(width_px: i32, height_px: i32, model: TrayIconKind) -> (i32, i32) {
+fn default_position(width_px: i32, height_px: i32, model: ProviderId) -> (i32, i32) {
     // Bottom-right of primary work area, with a 24-pixel gap from the edges.
     // Stagger the Codex bubble above the Claude one if both are enabled.
     unsafe {

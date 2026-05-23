@@ -9,8 +9,7 @@
 use std::ffi::c_void;
 
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{BOOL, HWND};
 use windows::Win32::Graphics::Gdi::{
     CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER,
     DIB_RGB_COLORS, HBITMAP,
@@ -199,9 +198,3 @@ fn pixmap_to_hicon(pixmap: &Pixmap) -> Option<HICON> {
         hicon
     }
 }
-
-// Silence import warnings if we end up not needing PCWSTR after later edits.
-#[allow(dead_code)]
-const _: PCWSTR = PCWSTR::null();
-
-use windows::Win32::Foundation::BOOL;
