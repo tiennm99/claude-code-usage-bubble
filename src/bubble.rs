@@ -1054,7 +1054,7 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
         }
     };
     let tail_bar_right = (tail_countdown_left - pad).max(tail_bar_left + bar_render_min);
-    let tail_bar_h = scale_to_dpi(5, dpi);
+    let tail_bar_h = (height_px * 9 / 100).clamp(scale_to_dpi(5, dpi), scale_to_dpi(12, dpi));
     let tail_bar_top = (height_px - tail_bar_h) / 2;
 
     BubbleLayout {
