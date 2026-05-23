@@ -1226,6 +1226,19 @@ fn copy_pixmap_to_dib(pixmap: &Pixmap, dst: &mut [u32]) {
     }
 }
 
+/// Re-stamp the alpha byte of every DIB pixel from the source `Pixmap`. Used
+/// after GDI text rendering, which writes RGB but leaves the BI_RGB DIB's
+/// "reserved" alpha byte at zero — making glyph pixels appear transparent
+/// when `UpdateLayeredWindow` composites with `AC_SRC_ALPHA`.
+fn restore_alpha_from_pixmap(pixmap: &Pixmap, dst: &mut [u32]) {
+    let src = pixmap.data();
+    let pixel_count = (pixmap.width() * pixmap.height()) as usize;
+    for i in 0..pixel_count {
+        let a = src[i * 4 + 3] as u32;
+        dst[i] = (dst[i] & 0x00FF_FFFF) | (a << 24);
+    }
+}
+
 fn measure_text_w(hdc: HDC, text: &str, font_height_px: i32) -> i32 {
     use windows::Win32::Foundation::SIZE;
     let font_name = wide_str("Segoe UI");
@@ -1326,12 +1339,25 @@ fn render(hwnd: HWND) {
 
         // Paint shape via tiny-skia (AA), then copy into the DIB. GDI text
         // overlays on top of the resulting bitmap.
-        if let Some(pixmap) = paint_bubble_pixmap(&layout, &inputs) {
-            copy_pixmap_to_dib(&pixmap, pixels);
+        let pixmap_opt = paint_bubble_pixmap(&layout, &inputs);
+        if let Some(ref pixmap) = pixmap_opt {
+            copy_pixmap_to_dib(pixmap, pixels);
         } else {
             pixels.fill(0);
         }
         paint_bubble_text(mem_dc, &layout, &inputs);
+        // GDI text writes RGB into the 32bpp BI_RGB DIB but does not preserve
+        // the alpha byte (per the BITMAPINFOHEADER contract: byte 3 is
+        // "reserved/0" for BI_RGB). UpdateLayeredWindow with AC_SRC_ALPHA then
+        // reads those zeroed alpha bytes and paints the glyph pixels as fully
+        // transparent — desktop bleeds through. Fix: re-stamp the alpha
+        // channel from the tiny-skia Pixmap we still have in scope. This
+        // preserves the AA alpha on the stadium's curved perimeter and forces
+        // glyph pixels back to the opacity tiny-skia computed for that
+        // location (255 in the interior, 0 outside).
+        if let Some(ref pixmap) = pixmap_opt {
+            restore_alpha_from_pixmap(pixmap, pixels);
+        }
 
         let mut wr = RECT::default();
         let _ = GetWindowRect(hwnd, &mut wr);
