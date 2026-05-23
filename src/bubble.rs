@@ -979,8 +979,8 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let height_px = scale_to_dpi(bubble_height_logical(size_logical), dpi);
     let head_diameter = height_px;
 
-    let head_pad = scale_to_dpi(6, dpi);
-    let ring_stroke_w = scale_to_dpi(3, dpi).max(2) as f32;
+    let head_pad = scale_to_dpi(4, dpi);
+    let ring_stroke_w = scale_to_dpi(3, dpi).clamp(2, 4) as f32;
     let ring_cx = (head_diameter as f32) / 2.0;
     let ring_cy = (height_px as f32) / 2.0;
     // Ring centerline: midway between outer and inner edge, then keep stroke
@@ -988,13 +988,14 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let ring_outer = (head_diameter as f32) / 2.0 - (head_pad as f32);
     let ring_radius = ring_outer - ring_stroke_w / 2.0;
 
-    let big_font_px = (head_diameter * 35 / 100).max(scale_to_dpi(12, dpi));
-    let small_font_px = ((big_font_px * 45) / 100).max(scale_to_dpi(8, dpi));
+    let big_font_px = (head_diameter * 26 / 100).max(scale_to_dpi(11, dpi));
+    let small_font_px = ((big_font_px * 55) / 100).max(scale_to_dpi(9, dpi));
     let main_font_px = small_font_px;
 
     let head_label_h = small_font_px + scale_to_dpi(2, dpi);
     let head_pct_h = big_font_px + scale_to_dpi(2, dpi);
-    let head_total_h = head_label_h + head_pct_h;
+    let label_pct_gap = (big_font_px * 15 / 100).max(scale_to_dpi(2, dpi));
+    let head_total_h = head_label_h + label_pct_gap + head_pct_h;
     let head_text_top = (height_px - head_total_h) / 2;
     let head_label_rect = RECT {
         left: scale_to_dpi(4, dpi),
@@ -1004,7 +1005,7 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     };
     let head_pct_rect = RECT {
         left: scale_to_dpi(4, dpi),
-        top: head_text_top + head_label_h,
+        top: head_text_top + head_label_h + label_pct_gap,
         right: head_diameter - scale_to_dpi(4, dpi),
         bottom: head_text_top + head_total_h,
     };
@@ -1023,7 +1024,7 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let tail_bar_left = tail_label_right + pad;
     let tail_bar_right =
         (tail_countdown_left - pad).max(tail_bar_left + scale_to_dpi(20, dpi));
-    let tail_bar_h = scale_to_dpi(6, dpi);
+    let tail_bar_h = scale_to_dpi(5, dpi);
     let tail_bar_top = (height_px - tail_bar_h) / 2;
 
     BubbleLayout {
