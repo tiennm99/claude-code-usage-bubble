@@ -1,20 +1,21 @@
-// Floating rounded-rectangle bubble window.
+// Floating stadium-shaped bubble window.
 //
 // Top-level window with WS_POPUP + WS_EX_LAYERED + WS_EX_TOPMOST + WS_EX_NOACTIVATE.
-// Shape is achieved via per-pixel alpha (alpha=0 outside the rounded rect) and
-// confirmed via WM_NCHITTEST returning HTCAPTION inside the rect, HTTRANSPARENT
-// outside. The OS handles drag automatically because HTCAPTION inside the
-// rect puts the click into the system move loop.
+// The shape is a stadium (rounded-rect with corner_radius = height/2). The left
+// half is the "head" — a stroked progress ring around the 5h percentage glyph.
+// The right half is the "tail" — small "7d" label, thin progress bar, countdown.
 //
-// Layout: two horizontal bars stacked vertically — top = session (5h), bottom =
-// weekly (7d) — each followed by right-aligned "X% · Yh Zm" text. The aspect
-// ratio is fixed at BUBBLE_ASPECT (3:1) so `size_logical` is interpreted as
-// width and the height is derived.
+// Painting is hybrid: tiny-skia renders the shape (AA fills + AA stroked arc)
+// into a Pixmap; the Pixmap is copied byte-for-byte into a 32bpp BI_RGB DIB;
+// GDI then overlays ClearType text on top; UpdateLayeredWindow blits the result
+// to the screen with per-pixel alpha. WM_NCHITTEST returns HTCAPTION inside the
+// stadium so the OS handles drag for free.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -51,28 +52,6 @@ const TASKBAR_GAP_LOGICAL: i32 = 4;
 const PEER_ALIGN_TOLERANCE_LOGICAL: i32 = 8;
 const CLASS_NAME: &str = "ClaudeCodeUsageBubble";
 const FULLSCREEN_POLL_MS: u32 = 1500;
-
-/// Per-width breakpoint defining bar height, text font size, and row gap in
-/// *logical* pixels. Picked so that the smallest bubble is still legible and
-/// the largest doesn't waste vertical space.
-#[derive(Clone, Copy)]
-struct Breakpoint {
-    bar_h: i32,
-    font: i32,
-    row_gap: i32,
-}
-
-fn breakpoint_for_width_logical(w: i32) -> Breakpoint {
-    if w <= 140 {
-        Breakpoint { bar_h: 12, font: 11, row_gap: 4 }
-    } else if w <= 200 {
-        Breakpoint { bar_h: 16, font: 13, row_gap: 6 }
-    } else if w <= 280 {
-        Breakpoint { bar_h: 20, font: 15, row_gap: 8 }
-    } else {
-        Breakpoint { bar_h: 24, font: 17, row_gap: 10 }
-    }
-}
 
 /// (num, den) such that bubble_height = (width * den) / num. 3:1 below 200,
 /// 2.8:1 below 280, 2.6:1 above — the bubble gets a touch taller as it
@@ -574,7 +553,7 @@ fn hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 }
 
 fn corner_radius_px(height_px: i32) -> i32 {
-    (height_px / 3).max(4)
+    height_px / 2
 }
 
 fn point_in_rounded_rect(x: i32, y: i32, w: i32, h: i32, r: i32) -> bool {
@@ -964,107 +943,285 @@ fn check_fullscreen(bubble_hwnd: HWND) {
 
 // ---------- Painting ----------
 
-const ACCENT_STRIPE_W_LOGICAL: i32 = 4;
-const LABEL_PAD_LOGICAL: i32 = 6;
 // Sized for the widest countdown across all shipped locales. Korean
 // "999시간" (3 digits + 2 CJK chars for the hour suffix) is the current
 // worst case; ASCII-only "999d" was too narrow and let CJK text spill
 // out of the column. Update this when adding a locale with a longer
 // suffix.
 const COUNTDOWN_TEMPLATE: &str = "999시간";
-// Percent now lives in its own column between the bar and the countdown so
-// the two numeric readouts ("44%" and "3h") sit next to each other for
-// quick scanning, and the percent never has to fight the bar's fill colour
-// for contrast.
-const PERCENT_TEMPLATE: &str = "100%";
 
-struct BarLayout {
-    /// Bubble width in pixels.
+/// Geometry for the bubble's "circle head + pill tail" shape, in DPI-scaled pixels.
+///
+/// The outline is a stadium (rounded rect with `corner_radius = canvas_h / 2`).
+/// The left `head_diameter × canvas_h` square holds the 5h progress ring + big
+/// percent glyph. The rest is the tail: 7d label, thin bar, countdown.
+struct BubbleLayout {
     canvas_w: i32,
-    /// Bubble height in pixels.
     canvas_h: i32,
-    /// Corner radius of the rounded rectangle.
     corner_radius: i32,
-    /// Accent stripe (left edge) in pixels — Claude orange or Codex neutral.
-    accent_right: i32,
-    /// Row label column ("5h" / "7d").
-    label_left: i32,
-    label_right: i32,
-    /// Percent column ("44%"), rendered on the bubble background.
-    percent_left: i32,
-    percent_right: i32,
-    /// Bar geometry.
-    bar_left: i32,
-    bar_right: i32,
-    bar_h: i32,
-    /// Right-side countdown text column.
-    right_text_left: i32,
-    right_text_right: i32,
-    /// Vertical positions (top edge of each row's bar).
-    row1_y: i32,
-    row2_y: i32,
-    /// Font size for the main text (percent + countdown).
-    font_px: i32,
-    /// Font size for the muted row labels — a notch smaller than `font_px`.
-    label_font_px: i32,
+    head_diameter: i32,
+    ring_cx: f32,
+    ring_cy: f32,
+    ring_radius: f32,
+    ring_stroke_w: f32,
+    head_label_rect: RECT,
+    head_pct_rect: RECT,
+    tail_label_rect: RECT,
+    tail_bar_rect: RECT,
+    tail_countdown_rect: RECT,
+    big_font_px: i32,
+    small_font_px: i32,
+    main_font_px: i32,
 }
 
-fn compute_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BarLayout {
-    let bp = breakpoint_for_width_logical(size_logical);
+fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayout {
     let width_px = scale_to_dpi(size_logical, dpi);
     let height_px = scale_to_dpi(bubble_height_logical(size_logical), dpi);
-    let bar_h = scale_to_dpi(bp.bar_h, dpi);
-    let row_gap = scale_to_dpi(bp.row_gap, dpi);
-    let pad_x = scale_to_dpi(10, dpi);
-    let pad_y = ((height_px - bar_h * 2 - row_gap) / 2).max(scale_to_dpi(6, dpi));
-    let accent_w = scale_to_dpi(ACCENT_STRIPE_W_LOGICAL, dpi);
-    let label_pad = scale_to_dpi(LABEL_PAD_LOGICAL, dpi);
-    let corner_radius = scale_to_dpi((bp.bar_h + bp.row_gap).max(8), dpi).min(height_px / 2);
+    let head_diameter = height_px;
 
-    // Measure the worst-case strings against the real font so the columns are
-    // exactly wide enough — no more, no less.
-    let font_px = scale_to_dpi(bp.font, dpi).max(scale_to_dpi(11, dpi));
-    let label_font_px = scale_to_dpi(bp.font - 2, dpi).max(scale_to_dpi(9, dpi));
-    let countdown_w = measure_text_w(mem_dc, COUNTDOWN_TEMPLATE, font_px);
-    let percent_w = measure_text_w(mem_dc, PERCENT_TEMPLATE, font_px);
-    let label_w = measure_text_w(mem_dc, "5h", label_font_px)
-        .max(measure_text_w(mem_dc, "7d", label_font_px));
+    let head_pad = scale_to_dpi(6, dpi);
+    let ring_stroke_w = scale_to_dpi(3, dpi).max(2) as f32;
+    let ring_cx = (head_diameter as f32) / 2.0;
+    let ring_cy = (height_px as f32) / 2.0;
+    // Ring centerline: midway between outer and inner edge, then keep stroke
+    // inside the head padding. ring_radius is the centerline radius.
+    let ring_outer = (head_diameter as f32) / 2.0 - (head_pad as f32);
+    let ring_radius = ring_outer - ring_stroke_w / 2.0;
 
-    // Layout (left → right):
-    //   [accent] [pad] [label] [pad] [bar] [pad] [percent] [pad] [countdown] [pad_x]
-    let accent_left = 0;
-    let accent_right = accent_left + accent_w;
-    let label_left = accent_right + label_pad;
-    let label_right = label_left + label_w;
-    let bar_left = label_right + label_pad;
+    let big_font_px = (head_diameter * 35 / 100).max(scale_to_dpi(12, dpi));
+    let small_font_px = ((big_font_px * 45) / 100).max(scale_to_dpi(8, dpi));
+    let main_font_px = small_font_px;
 
-    let right_text_right = width_px - pad_x;
-    let right_text_left = (right_text_right - countdown_w).max(bar_left + scale_to_dpi(20, dpi));
-    let percent_right = (right_text_left - label_pad).max(bar_left + scale_to_dpi(20, dpi));
-    let percent_left = (percent_right - percent_w).max(bar_left + scale_to_dpi(20, dpi));
-    let bar_right = (percent_left - label_pad).max(bar_left + scale_to_dpi(20, dpi));
+    let head_label_h = small_font_px + scale_to_dpi(2, dpi);
+    let head_pct_h = big_font_px + scale_to_dpi(2, dpi);
+    let head_total_h = head_label_h + head_pct_h;
+    let head_text_top = (height_px - head_total_h) / 2;
+    let head_label_rect = RECT {
+        left: scale_to_dpi(4, dpi),
+        top: head_text_top,
+        right: head_diameter - scale_to_dpi(4, dpi),
+        bottom: head_text_top + head_label_h,
+    };
+    let head_pct_rect = RECT {
+        left: scale_to_dpi(4, dpi),
+        top: head_text_top + head_label_h,
+        right: head_diameter - scale_to_dpi(4, dpi),
+        bottom: head_text_top + head_total_h,
+    };
 
-    let row1_y = pad_y;
-    let row2_y = pad_y + bar_h + row_gap;
+    let tail_left = head_diameter;
+    let tail_right = width_px - scale_to_dpi(12, dpi);
+    let pad = scale_to_dpi(6, dpi);
 
-    BarLayout {
+    let countdown_w = measure_text_w(mem_dc, COUNTDOWN_TEMPLATE, main_font_px);
+    let label_w = measure_text_w(mem_dc, "7d", small_font_px);
+
+    let tail_label_left = tail_left + pad;
+    let tail_label_right = tail_label_left + label_w;
+    let tail_countdown_right = tail_right;
+    let tail_countdown_left = tail_countdown_right - countdown_w;
+    let tail_bar_left = tail_label_right + pad;
+    let tail_bar_right =
+        (tail_countdown_left - pad).max(tail_bar_left + scale_to_dpi(20, dpi));
+    let tail_bar_h = scale_to_dpi(6, dpi);
+    let tail_bar_top = (height_px - tail_bar_h) / 2;
+
+    BubbleLayout {
         canvas_w: width_px,
         canvas_h: height_px,
-        corner_radius,
-        accent_right,
-        label_left,
-        label_right,
-        percent_left,
-        percent_right,
-        bar_left,
-        bar_right,
-        bar_h,
-        right_text_left,
-        right_text_right,
-        row1_y,
-        row2_y,
-        font_px,
-        label_font_px,
+        corner_radius: height_px / 2,
+        head_diameter,
+        ring_cx,
+        ring_cy,
+        ring_radius,
+        ring_stroke_w,
+        head_label_rect,
+        head_pct_rect,
+        tail_label_rect: RECT {
+            left: tail_label_left,
+            top: 0,
+            right: tail_label_right,
+            bottom: height_px,
+        },
+        tail_bar_rect: RECT {
+            left: tail_bar_left,
+            top: tail_bar_top,
+            right: tail_bar_right,
+            bottom: tail_bar_top + tail_bar_h,
+        },
+        tail_countdown_rect: RECT {
+            left: tail_countdown_left,
+            top: 0,
+            right: tail_countdown_right,
+            bottom: height_px,
+        },
+        big_font_px,
+        small_font_px,
+        main_font_px,
+    }
+}
+
+/// Render the bubble's shape into a fresh tiny-skia `Pixmap`. The Pixmap is
+/// premultiplied RGBA at one byte per channel — the caller copies it into the
+/// GDI DIB section, then GDI text is overlaid on top.
+fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pixmap> {
+    let mut pixmap = Pixmap::new(layout.canvas_w as u32, layout.canvas_h as u32)?;
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+
+    let bg = if inputs.is_dark {
+        Color::from_hex("#1F1F1F")
+    } else {
+        Color::from_hex("#F3F3F3")
+    };
+    let track = if inputs.is_dark {
+        Color::from_hex("#3A3A3A")
+    } else {
+        Color::from_hex("#D6D6D6")
+    };
+
+    // ---- Stadium background ----
+    {
+        let mut paint = Paint::default();
+        paint.set_color(rgb_to_skia(bg));
+        paint.anti_alias = true;
+        let r = (layout.canvas_h as f32) / 2.0;
+        let w = layout.canvas_w as f32;
+        let h = layout.canvas_h as f32;
+
+        // Two end-cap circles + middle rect. Overlap is fine — same color.
+        let mut pb = PathBuilder::new();
+        pb.push_circle(r, r, r);
+        pb.push_circle(w - r, r, r);
+        if let Some(p) = pb.finish() {
+            pixmap.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+        if let Some(rect) = Rect::from_xywh(r, 0.0, (w - 2.0 * r).max(0.0), h) {
+            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+        }
+    }
+
+    // ---- Ring (5h) ----
+    {
+        // Track: full circle in muted color.
+        let mut paint = Paint::default();
+        paint.set_color(rgb_to_skia(track));
+        paint.anti_alias = true;
+        let mut stroke = Stroke::default();
+        stroke.width = layout.ring_stroke_w;
+        let mut pb = PathBuilder::new();
+        pb.push_circle(layout.ring_cx, layout.ring_cy, layout.ring_radius);
+        if let Some(p) = pb.finish() {
+            pixmap.stroke_path(&p, &paint, &stroke, Transform::identity(), None);
+        }
+
+        // Active sweep arc.
+        if let Some(pct) = inputs.session_pct {
+            let sweep = (pct.clamp(0.0, 100.0) / 100.0) as f32;
+            if sweep > 0.0 {
+                let mut color = crate::usage_color::bar_fill_color(inputs.model, inputs.is_dark, pct);
+                if pct >= 95.0 {
+                    let t = pulse_triangle(inputs.pulse_phase);
+                    color = brighten(color, t);
+                }
+                let mut paint = Paint::default();
+                paint.set_color(rgb_to_skia(color));
+                paint.anti_alias = true;
+                let mut stroke = Stroke::default();
+                stroke.width = layout.ring_stroke_w;
+                stroke.line_cap = LineCap::Round;
+                if let Some(path) =
+                    build_arc(layout.ring_cx, layout.ring_cy, layout.ring_radius, sweep)
+                {
+                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                }
+            }
+        }
+    }
+
+    // ---- Tail bar (7d) ----
+    {
+        let bar_x = layout.tail_bar_rect.left as f32;
+        let bar_y = layout.tail_bar_rect.top as f32;
+        let bar_w = (layout.tail_bar_rect.right - layout.tail_bar_rect.left) as f32;
+        let bar_h = (layout.tail_bar_rect.bottom - layout.tail_bar_rect.top) as f32;
+        let cap = bar_h * 0.5;
+        if bar_w > 0.0 && bar_h > 0.0 {
+            paint_pill(&mut pixmap, bar_x, bar_y, bar_w, bar_h, cap, track);
+            if let Some(pct) = inputs.weekly_pct {
+                let frac = (pct.clamp(0.0, 100.0) / 100.0) as f32;
+                let fill_w = bar_w * frac;
+                if fill_w > 0.0 {
+                    let mut color =
+                        crate::usage_color::bar_fill_color(inputs.model, inputs.is_dark, pct);
+                    if pct >= 95.0 {
+                        let t = pulse_triangle(inputs.pulse_phase);
+                        color = brighten(color, t);
+                    }
+                    let clipped_w = fill_w.min(bar_w);
+                    paint_pill(&mut pixmap, bar_x, bar_y, clipped_w, bar_h, cap, color);
+                }
+            }
+        }
+    }
+
+    Some(pixmap)
+}
+
+/// Fill a horizontal pill at `(x, y, w, h)` with circular end caps of radius
+/// `cap`. Used for both the track and the fill of the tail's 7d bar.
+fn paint_pill(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, cap: f32, color: Color) {
+    let mut paint = Paint::default();
+    paint.set_color(rgb_to_skia(color));
+    paint.anti_alias = true;
+    let mut pb = PathBuilder::new();
+    pb.push_circle(x + cap, y + h * 0.5, cap);
+    pb.push_circle(x + w - cap, y + h * 0.5, cap);
+    if let Some(p) = pb.finish() {
+        pixmap.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+    if let Some(rect) = Rect::from_xywh(x + cap, y, (w - 2.0 * cap).max(0.0), h) {
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
+}
+
+fn rgb_to_skia(c: Color) -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(c.r, c.g, c.b, 0xFF)
+}
+
+/// Build a clockwise arc path starting at 12 o'clock, sweeping `sweep_fraction`
+/// of a full turn. Sampled — tiny-skia 0.11 lacks a direct arc primitive.
+fn build_arc(cx: f32, cy: f32, radius: f32, sweep_fraction: f32) -> Option<tiny_skia::Path> {
+    let segments = ((sweep_fraction * 64.0).ceil() as usize).max(1);
+    let mut pb = PathBuilder::new();
+    let start_angle: f32 = -std::f32::consts::FRAC_PI_2;
+    let total = sweep_fraction * std::f32::consts::TAU;
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let a = start_angle + t * total;
+        let x = cx + a.cos() * radius;
+        let y = cy + a.sin() * radius;
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    pb.finish()
+}
+
+/// Copy a premultiplied-RGBA `Pixmap` into the 32bpp BI_RGB DIB the bubble
+/// uses for `UpdateLayeredWindow`. The DIB stores BGRA bytes (little-endian
+/// `0xAARRGGBB` when read as u32); tiny-skia's premultiplied alpha is exactly
+/// the format `AC_SRC_ALPHA` expects.
+fn copy_pixmap_to_dib(pixmap: &Pixmap, dst: &mut [u32]) {
+    let src = pixmap.data();
+    let pixel_count = (pixmap.width() * pixmap.height()) as usize;
+    for i in 0..pixel_count {
+        let r = src[i * 4];
+        let g = src[i * 4 + 1];
+        let b = src[i * 4 + 2];
+        let a = src[i * 4 + 3];
+        dst[i] = ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
     }
 }
 
@@ -1096,14 +1253,6 @@ fn measure_text_w(hdc: HDC, text: &str, font_height_px: i32) -> i32 {
         let _ = DeleteObject(font);
         size.cx
     }
-}
-
-/// Pack an `Rgb` for direct write into a 32-bpp `BI_RGB` DIB. The DIB stores
-/// bytes B,G,R,X in memory, so a little-endian u32 read is `(b) | (g<<8) | (r<<16)`.
-/// Note this is the OPPOSITE byte order from a GDI `COLORREF` (which is
-/// `(r) | (g<<8) | (b<<16)`) — don't confuse the two.
-fn rgb_to_dib(c: Color) -> u32 {
-    (c.b as u32) | ((c.g as u32) << 8) | ((c.r as u32) << 16)
 }
 
 struct PaintInputs {
@@ -1147,7 +1296,7 @@ fn render(hwnd: HWND) {
             ReleaseDC(hwnd, screen_dc);
             return;
         }
-        let layout = compute_layout(size_logical, dpi, mem_dc);
+        let layout = compute_bubble_layout(size_logical, dpi, mem_dc);
 
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -1174,17 +1323,14 @@ fn render(hwnd: HWND) {
         let pixel_count = (layout.canvas_w * layout.canvas_h) as usize;
         let pixels = std::slice::from_raw_parts_mut(bits as *mut u32, pixel_count);
 
-        // Everything outside the rounded rect stays 0 (fully transparent).
-        pixels.fill(0);
-
-        paint_background(pixels, &layout, &inputs);
-        paint_accent_stripe(pixels, &layout, inputs.model, inputs.is_dark);
-        paint_bars(pixels, &layout, &inputs);
-        paint_text_layer(mem_dc, &layout, &inputs);
-
-        // Final alpha pass: alpha=255 inside the rounded rect, 0 outside. This
-        // also lifts GDI-drawn text (which leaves alpha=0) into the visible plane.
-        apply_alpha_mask(pixels, &layout);
+        // Paint shape via tiny-skia (AA), then copy into the DIB. GDI text
+        // overlays on top of the resulting bitmap.
+        if let Some(pixmap) = paint_bubble_pixmap(&layout, &inputs) {
+            copy_pixmap_to_dib(&pixmap, pixels);
+        } else {
+            pixels.fill(0);
+        }
+        paint_bubble_text(mem_dc, &layout, &inputs);
 
         let mut wr = RECT::default();
         let _ = GetWindowRect(hwnd, &mut wr);
@@ -1222,104 +1368,6 @@ fn render(hwnd: HWND) {
     }
 }
 
-fn paint_background(pixels: &mut [u32], layout: &BarLayout, inputs: &PaintInputs) {
-    let bg = if inputs.is_dark {
-        Color::from_hex("#1F1F1F")
-    } else {
-        Color::from_hex("#F3F3F3")
-    };
-    let bg_packed = rgb_to_dib(bg);
-    let blush_packed = rgb_to_dib(blend(bg, Color::from_hex("#C45020"), 0.15));
-
-    let row1_blush = inputs.session_pct.is_some_and(|p| p >= 95.0);
-    let row2_blush = inputs.weekly_pct.is_some_and(|p| p >= 95.0);
-    let row1_band = row_band(layout, layout.row1_y);
-    let row2_band = row_band(layout, layout.row2_y);
-
-    for y in 0..layout.canvas_h {
-        for x in 0..layout.canvas_w {
-            if !point_in_rounded_rect(x, y, layout.canvas_w, layout.canvas_h, layout.corner_radius) {
-                continue;
-            }
-            let in_row1 = row1_blush && y >= row1_band.0 && y < row1_band.1;
-            let in_row2 = row2_blush && y >= row2_band.0 && y < row2_band.1;
-            let pixel = if in_row1 || in_row2 { blush_packed } else { bg_packed };
-            pixels[(y * layout.canvas_w + x) as usize] = pixel;
-        }
-    }
-}
-
-/// Top/bottom y-extent for a row's blush band — slightly taller than the bar
-/// so the tint frames the row rather than just sitting under the fill.
-fn row_band(layout: &BarLayout, row_top: i32) -> (i32, i32) {
-    let padding = (layout.bar_h / 4).max(2);
-    let top = (row_top - padding).max(0);
-    let bot = (row_top + layout.bar_h + padding).min(layout.canvas_h);
-    (top, bot)
-}
-
-fn paint_accent_stripe(pixels: &mut [u32], layout: &BarLayout, model: ProviderId, is_dark: bool) {
-    let stripe = rgb_to_dib(crate::usage_color::accent_color_for(model, is_dark));
-    for y in 0..layout.canvas_h {
-        for x in 0..layout.accent_right {
-            if !point_in_rounded_rect(x, y, layout.canvas_w, layout.canvas_h, layout.corner_radius) {
-                continue;
-            }
-            pixels[(y * layout.canvas_w + x) as usize] = stripe;
-        }
-    }
-}
-
-fn paint_bars(pixels: &mut [u32], layout: &BarLayout, inputs: &PaintInputs) {
-    let track = if inputs.is_dark {
-        Color::from_hex("#3A3A3A")
-    } else {
-        Color::from_hex("#D6D6D6")
-    };
-    paint_one_bar(pixels, layout, layout.row1_y, inputs.session_pct, track, inputs);
-    paint_one_bar(pixels, layout, layout.row2_y, inputs.weekly_pct, track, inputs);
-}
-
-fn paint_one_bar(
-    pixels: &mut [u32],
-    layout: &BarLayout,
-    top: i32,
-    pct: Option<f64>,
-    track: Color,
-    inputs: &PaintInputs,
-) {
-    let bar_w = layout.bar_right - layout.bar_left;
-    if bar_w <= 0 {
-        return;
-    }
-    let track_packed = rgb_to_dib(track);
-    for y in top..top + layout.bar_h {
-        for x in layout.bar_left..layout.bar_right {
-            pixels[(y * layout.canvas_w + x) as usize] = track_packed;
-        }
-    }
-    let Some(p) = pct else {
-        return;
-    };
-    let fill_w = ((p.clamp(0.0, 100.0) / 100.0) * bar_w as f64).round() as i32;
-    if fill_w <= 0 {
-        return;
-    }
-    let mut accent_rgb = crate::usage_color::bar_fill_color(inputs.model, inputs.is_dark, p);
-    if p >= 95.0 {
-        // Slow brightness triangle: 0.85 → 1.15 over 24 ticks (≈1.9s @ 80ms).
-        let t = pulse_triangle(inputs.pulse_phase);
-        accent_rgb = brighten(accent_rgb, t);
-    }
-    let accent_packed = rgb_to_dib(accent_rgb);
-    let end_x = (layout.bar_left + fill_w).min(layout.bar_right);
-    for y in top..top + layout.bar_h {
-        for x in layout.bar_left..end_x {
-            pixels[(y * layout.canvas_w + x) as usize] = accent_packed;
-        }
-    }
-}
-
 /// Triangle wave in [0, 1] with period 24 ticks. 0 at phase=0,12; 1 at phase=6,18.
 fn pulse_triangle(phase: u32) -> f64 {
     let p = (phase % 24) as i32;
@@ -1338,20 +1386,9 @@ fn brighten(c: Color, t: f64) -> Color {
     )
 }
 
-fn blend(a: Color, b: Color, t: f64) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    Color::new(
-        ((a.r as f64) * (1.0 - t) + (b.r as f64) * t).round() as u8,
-        ((a.g as f64) * (1.0 - t) + (b.g as f64) * t).round() as u8,
-        ((a.b as f64) * (1.0 - t) + (b.b as f64) * t).round() as u8,
-    )
-}
-
-/// One pass over the GDI text: row labels (muted) + percent + countdown.
-/// The percent column lives between the bar and the countdown so the
-/// numeric readouts cluster together for quick scanning, and the percent
-/// text always sits on the bubble background — never on the bar fill.
-fn paint_text_layer(hdc: HDC, layout: &BarLayout, inputs: &PaintInputs) {
+/// Paint the new bubble's text overlay via GDI: small "5h" label + big "%"
+/// glyph in the head, small "7d" label + countdown on the tail.
+fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
     let text_color = if inputs.is_dark {
         Color::from_hex("#EAEAEA")
     } else {
@@ -1365,36 +1402,59 @@ fn paint_text_layer(hdc: HDC, layout: &BarLayout, inputs: &PaintInputs) {
 
     let font_name = wide_str("Segoe UI");
     unsafe {
-        let main_font = create_font(layout.font_px, &font_name, FW_NORMAL.0 as i32);
-        let bold_font = create_font(layout.font_px, &font_name, FW_SEMIBOLD.0 as i32);
-        let label_font = create_font(layout.label_font_px, &font_name, FW_NORMAL.0 as i32);
+        let big_font = create_font(layout.big_font_px, &font_name, FW_SEMIBOLD.0 as i32);
+        let small_font = create_font(layout.small_font_px, &font_name, FW_NORMAL.0 as i32);
+        let main_font = create_font(layout.main_font_px, &font_name, FW_NORMAL.0 as i32);
         SetBkMode(hdc, TRANSPARENT);
 
-        // Save the DC's original font so we can restore it before deleting
-        // ours. DeleteObject silently fails on a still-selected HFONT,
-        // which would leak the handle on every paint frame.
-        let prev_font = SelectObject(hdc, label_font);
+        let prev_font = SelectObject(hdc, small_font);
+
+        // Head: "5h" label (muted, centered horizontally).
         SetTextColor(hdc, COLORREF(muted_color.into_colorref()));
-        draw_label(hdc, layout, layout.row1_y, "5h");
-        draw_label(hdc, layout, layout.row2_y, "7d");
+        draw_text_in_rect(hdc, &layout.head_label_rect, "5h", DT_CENTER);
 
-        // Percent in its own column (between bar and countdown).
-        SelectObject(hdc, bold_font);
+        // Head: big "X%" glyph centered.
+        SelectObject(hdc, big_font);
         SetTextColor(hdc, COLORREF(text_color.into_colorref()));
-        draw_percent(hdc, layout, layout.row1_y, inputs.session_pct);
-        draw_percent(hdc, layout, layout.row2_y, inputs.weekly_pct);
+        let pct_text = match inputs.session_pct {
+            Some(p) => format!("{:.0}%", p),
+            None => String::from("—"),
+        };
+        draw_text_in_rect(hdc, &layout.head_pct_rect, &pct_text, DT_CENTER);
 
-        // Countdown on the right.
+        // Tail: "7d" label (muted, left-aligned).
+        SelectObject(hdc, small_font);
+        SetTextColor(hdc, COLORREF(muted_color.into_colorref()));
+        draw_text_in_rect(hdc, &layout.tail_label_rect, "7d", DT_LEFT);
+
+        // Tail: countdown (right-aligned).
         SelectObject(hdc, main_font);
         SetTextColor(hdc, COLORREF(text_color.into_colorref()));
-        draw_countdown(hdc, layout, layout.row1_y, &inputs.session_text);
-        draw_countdown(hdc, layout, layout.row2_y, &inputs.weekly_text);
+        if !inputs.weekly_text.is_empty() {
+            draw_text_in_rect(hdc, &layout.tail_countdown_rect, &inputs.weekly_text, DT_RIGHT);
+        }
 
-        // Restore the original font, then it is safe to delete ours.
         SelectObject(hdc, prev_font);
+        let _ = DeleteObject(big_font);
+        let _ = DeleteObject(small_font);
         let _ = DeleteObject(main_font);
-        let _ = DeleteObject(bold_font);
-        let _ = DeleteObject(label_font);
+    }
+}
+
+/// Draw `text` into `rect` with the given horizontal alignment flag, vertically
+/// centered. The DT_NOCLIP flag preserves ascenders/descenders that would
+/// otherwise be clipped by tight rects.
+fn draw_text_in_rect(hdc: HDC, rect: &RECT, text: &str, halign: DRAW_TEXT_FORMAT) {
+    let mut buf = wide_str(text);
+    let len_no_nul = buf.len().saturating_sub(1);
+    let mut r = *rect;
+    unsafe {
+        let _ = DrawTextW(
+            hdc,
+            &mut buf[..len_no_nul],
+            &mut r,
+            halign | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+        );
     }
 }
 
@@ -1417,99 +1477,6 @@ fn create_font(height_px: i32, name_w: &[u16], weight: i32) -> HFONT {
             PCWSTR::from_raw(name_w.as_ptr()),
         )
     }
-}
-
-fn draw_label(hdc: HDC, layout: &BarLayout, row_top: i32, text: &str) {
-    let mut text_w = wide_str(text);
-    let len_no_nul = text_w.len().saturating_sub(1);
-    let mut rect = RECT {
-        left: layout.label_left,
-        top: row_top - 2,
-        right: layout.label_right,
-        bottom: row_top + layout.bar_h + 2,
-    };
-    unsafe {
-        let _ = DrawTextW(
-            hdc,
-            &mut text_w[..len_no_nul],
-            &mut rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
-        );
-    }
-}
-
-fn draw_percent(hdc: HDC, layout: &BarLayout, row_top: i32, pct: Option<f64>) {
-    let Some(p) = pct else {
-        return;
-    };
-    let text = format!("{:.0}%", p);
-    let mut text_buf = wide_str(&text);
-    let len_no_nul = text_buf.len().saturating_sub(1);
-    let mut rect = RECT {
-        left: layout.percent_left,
-        top: row_top,
-        right: layout.percent_right,
-        bottom: row_top + layout.bar_h,
-    };
-    unsafe {
-        let _ = DrawTextW(
-            hdc,
-            &mut text_buf[..len_no_nul],
-            &mut rect,
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
-        );
-    }
-}
-
-fn draw_countdown(hdc: HDC, layout: &BarLayout, row_top: i32, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    // Left-align so the countdown sits right next to the bar with only the
-    // `label_pad` gap. Right-aligning to the bubble's far edge left a visible
-    // float between bar end and number.
-    let mut text_w = wide_str(text);
-    let len_no_nul = text_w.len().saturating_sub(1);
-    let mut rect = RECT {
-        left: layout.right_text_left,
-        top: row_top - 2,
-        right: layout.right_text_right,
-        bottom: row_top + layout.bar_h + 2,
-    };
-    unsafe {
-        let _ = DrawTextW(
-            hdc,
-            &mut text_w[..len_no_nul],
-            &mut rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP | DT_END_ELLIPSIS,
-        );
-    }
-}
-
-fn apply_alpha_mask(pixels: &mut [u32], layout: &BarLayout) {
-    for y in 0..layout.canvas_h {
-        for x in 0..layout.canvas_w {
-            let idx = (y * layout.canvas_w + x) as usize;
-            if point_in_rounded_rect(x, y, layout.canvas_w, layout.canvas_h, layout.corner_radius) {
-                pixels[idx] |= 0xFF00_0000;
-            } else {
-                pixels[idx] = 0;
-            }
-        }
-    }
-}
-
-/// Relative luminance of an sRGB color in 0..255 space. Cheap approximation
-/// of the Rec. 709 coefficients — good enough for "should the text on this
-/// pixel be white or black?" decisions.
-fn luminance(c: Color) -> u32 {
-    (c.r as u32 * 299 + c.g as u32 * 587 + c.b as u32 * 114) / 1000
-}
-
-/// Returns true when `c` is light enough that black text is more readable
-/// than white text on top of it.
-fn use_dark_text_over(c: Color) -> bool {
-    luminance(c) >= 150
 }
 
 // ---------- Helpers ----------
