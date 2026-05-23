@@ -66,7 +66,7 @@ fn render_pixmap(kind: ProviderId, percent: Option<f64>) -> Pixmap {
     if let Some(p) = percent {
         let sweep = (p.clamp(0.0, 100.0) / 100.0) as f32;
         if sweep > 0.0 {
-            let fill = usage_color(p);
+            let fill = usage_color(kind, p);
             let mut paint = Paint::default();
             paint.set_color_rgba8(fill[0], fill[1], fill[2], 255);
             paint.anti_alias = true;
@@ -116,33 +116,12 @@ fn base_color(kind: ProviderId) -> [u8; 3] {
     }
 }
 
-fn usage_color(percent: f64) -> [u8; 3] {
-    // Color gradient: soft orange (low usage) → red (near-cap).
-    let stops: [(f64, [u8; 3]); 5] = [
-        (0.0, [0xD9, 0x77, 0x57]),
-        (50.0, [0xD9, 0x77, 0x57]),
-        (75.0, [0xCC, 0x8C, 0x20]),
-        (90.0, [0xC4, 0x50, 0x20]),
-        (100.0, [0xB8, 0x20, 0x20]),
-    ];
-    for pair in stops.windows(2) {
-        let (a_p, a_c) = pair[0];
-        let (b_p, b_c) = pair[1];
-        if percent <= b_p {
-            let span = (b_p - a_p).max(f64::EPSILON);
-            let t = ((percent - a_p) / span).clamp(0.0, 1.0);
-            return [
-                lerp(a_c[0], b_c[0], t),
-                lerp(a_c[1], b_c[1], t),
-                lerp(a_c[2], b_c[2], t),
-            ];
-        }
-    }
-    stops[stops.len() - 1].1
-}
-
-fn lerp(a: u8, b: u8, t: f64) -> u8 {
-    (a as f64 + (b as f64 - a as f64) * t).round() as u8
+/// Sweep-ring fill color for the tray badge. The badge inner disk is always
+/// dark regardless of system theme, so we pass `is_dark = true` to keep the
+/// ring readable (Codex sweep stays white instead of charcoal).
+fn usage_color(kind: ProviderId, percent: f64) -> [u8; 3] {
+    let c = crate::usage_color::bar_fill_color(kind, true, percent);
+    [c.r, c.g, c.b]
 }
 
 // ---------- Pixmap → HICON ----------

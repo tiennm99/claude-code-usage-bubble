@@ -1205,29 +1205,13 @@ fn row_band(layout: &BarLayout, row_top: i32) -> (i32, i32) {
 }
 
 fn paint_accent_stripe(pixels: &mut [u32], layout: &BarLayout, model: TrayIconKind, is_dark: bool) {
-    let stripe = rgb_to_dib(accent_color_for(model, is_dark));
+    let stripe = rgb_to_dib(crate::usage_color::accent_color_for(model, is_dark));
     for y in 0..layout.canvas_h {
         for x in 0..layout.accent_right {
             if !point_in_rounded_rect(x, y, layout.canvas_w, layout.canvas_h, layout.corner_radius) {
                 continue;
             }
             pixels[(y * layout.canvas_w + x) as usize] = stripe;
-        }
-    }
-}
-
-/// Per-provider identity color. Claude = orange. Codex = white-in-dark /
-/// charcoal-in-light — picking a pure white in light mode would vanish into
-/// the `#F3F3F3` background, so we mirror to a contrasting neutral.
-fn accent_color_for(model: TrayIconKind, is_dark: bool) -> Color {
-    match model {
-        ProviderId::Claude => Color::from_hex("#D97757"),
-        ProviderId::ChatGpt => {
-            if is_dark {
-                Color::from_hex("#FFFFFF")
-            } else {
-                Color::from_hex("#2A2A2A")
-            }
         }
     }
 }
@@ -1267,7 +1251,7 @@ fn paint_one_bar(
     if fill_w <= 0 {
         return;
     }
-    let mut accent_rgb = bar_fill_color(inputs.model, inputs.is_dark, p);
+    let mut accent_rgb = crate::usage_color::bar_fill_color(inputs.model, inputs.is_dark, p);
     if p >= 95.0 {
         // Slow brightness triangle: 0.85 → 1.15 over 24 ticks (≈1.9s @ 80ms).
         let t = pulse_triangle(inputs.pulse_phase);
@@ -1458,27 +1442,6 @@ fn apply_alpha_mask(pixels: &mut [u32], layout: &BarLayout) {
                 pixels[idx] = 0;
             }
         }
-    }
-}
-
-/// Discrete 4-band fill color. The "safe" band uses the provider's identity
-/// color so Codex bars stay white-on-dark while Claude bars stay orange; the
-/// warning bands are the same alarm palette regardless of provider so an
-/// approaching-limit always looks the same to the eye.
-///
-/// - <60%   → provider accent (Claude `#D97757` / Codex theme-derived)
-/// - 60–80% → amber           (#E0A040)
-/// - 80–95% → red             (#C45020)
-/// - ≥95%   → deep red        (#A01818) — paired with pulse animation
-pub fn bar_fill_color(model: TrayIconKind, is_dark: bool, percent: f64) -> Color {
-    if percent < 60.0 {
-        accent_color_for(model, is_dark)
-    } else if percent < 80.0 {
-        Color::from_hex("#E0A040")
-    } else if percent < 95.0 {
-        Color::from_hex("#C45020")
-    } else {
-        Color::from_hex("#A01818")
     }
 }
 

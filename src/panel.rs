@@ -7,6 +7,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -118,6 +121,8 @@ pub fn show(data: PanelData, anchor_hwnd: HWND) {
         },
     };
 
+    apply_win11_window_chrome(hwnd);
+
     {
         let mut guard = lock_state();
         if let Some(p) = guard.as_mut() {
@@ -152,7 +157,7 @@ fn create_panel_window(x: i32, y: i32, w: i32, h: i32) -> Option<HWND> {
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             PCWSTR::from_raw(class_w.as_ptr()),
             PCWSTR::from_raw(title_w.as_ptr()),
-            WS_POPUP | WS_BORDER,
+            WS_POPUP,
             x,
             y,
             w,
@@ -169,6 +174,23 @@ fn create_panel_window(x: i32, y: i32, w: i32, h: i32) -> Option<HWND> {
         None
     } else {
         Some(hwnd)
+    }
+}
+
+/// Apply Windows 11 rounded corners. Win11-only — `DwmSetWindowAttribute`
+/// returns an error on Win10 and earlier, which we deliberately swallow so
+/// the panel falls back to square corners without complaint. Idempotent:
+/// DWM ignores redundant identical-value sets, so calling this on every
+/// `show()` is safe.
+fn apply_win11_window_chrome(hwnd: HWND) {
+    unsafe {
+        let pref = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const _,
+            std::mem::size_of_val(&pref) as u32,
+        );
     }
 }
 
@@ -269,21 +291,15 @@ fn paint(hwnd: HWND, hdc: HDC) {
     } else {
         Color::from_hex("#D6D6D6")
     };
-    let accent = bar_color_for(data.model, data.session_pct.max(data.weekly_pct), data.is_dark);
+    let session_accent = bar_color_for(data.model, data.session_pct, data.is_dark);
+    let weekly_accent = bar_color_for(data.model, data.weekly_pct, data.is_dark);
 
     unsafe {
         let bg_brush = CreateSolidBrush(COLORREF(bg.into_colorref()));
         FillRect(hdc, &rc, bg_brush);
         let _ = DeleteObject(bg_brush);
 
-        // 4-px accent stripe matching the bubble — same provider color so the
-        // identity carries across both surfaces. Codex is theme-aware so a
-        // pure white stripe doesn't vanish into the light-mode background.
-        let stripe_color = match (data.model, data.is_dark) {
-            (ProviderId::Claude, _) => Color::from_hex("#D97757"),
-            (ProviderId::ChatGpt, true) => Color::from_hex("#FFFFFF"),
-            (ProviderId::ChatGpt, false) => Color::from_hex("#2A2A2A"),
-        };
+        let stripe_color = crate::usage_color::accent_color_for(data.model, data.is_dark);
         let stripe_w = scaled(4);
         let stripe_rect = RECT {
             left: 0,
@@ -333,7 +349,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
             &data.session_text,
             text_color,
             track,
-            accent,
+            session_accent,
             dpi,
         );
 
@@ -349,7 +365,7 @@ fn paint(hwnd: HWND, hdc: HDC) {
             &data.weekly_text,
             text_color,
             track,
-            accent,
+            weekly_accent,
             dpi,
         );
     }
@@ -483,7 +499,7 @@ fn draw_text(
 }
 
 fn bar_color_for(model: ProviderId, percent: f64, is_dark: bool) -> Color {
-    crate::bubble::bar_fill_color(model, is_dark, percent)
+    crate::usage_color::bar_fill_color(model, is_dark, percent)
 }
 
 fn clone_data() -> Option<PanelData> {

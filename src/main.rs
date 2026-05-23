@@ -13,6 +13,7 @@ mod os;
 mod tray;
 mod update;
 mod usage;
+mod usage_color;
 
 // Application surface.
 mod app;
