@@ -1114,25 +1114,16 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let content_left = tail_left + pad;
     let content_right = tail_right;
     let content_w = (content_right - content_left).max(0);
-    let time_text_w = countdown_w.min(content_w);
-    let time_text_left = content_right - time_text_w;
-    let time_bar_min = scale_to_dpi(8, dpi);
-    let time_bar_right = (time_text_left - pad).max(content_left + time_bar_min);
-    let time_bar_left = content_left.min(time_bar_right);
-
-    let usage_bar_min = scale_to_dpi(8, dpi);
-    let show_usage_pct = content_w >= pct_reserve_w + pad + usage_bar_min;
-    let usage_pct_right = if show_usage_pct {
-        content_left + pct_reserve_w
+    let bar_min = scale_to_dpi(8, dpi);
+    let desired_text_w = countdown_w.max(pct_reserve_w);
+    let text_w = if content_w >= desired_text_w + pad + bar_min {
+        desired_text_w
     } else {
-        content_left
+        (content_w - pad - bar_min).max(0)
     };
-    let usage_bar_left = if show_usage_pct {
-        usage_pct_right + pad
-    } else {
-        content_left
-    };
-    let usage_bar_right = content_right.max(usage_bar_left + usage_bar_min);
+    let text_left = content_right - text_w;
+    let bar_left = content_left;
+    let bar_right = (text_left - pad).max(bar_left + bar_min);
 
     BubbleLayout {
         canvas_w: width_px,
@@ -1148,27 +1139,27 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
         head_label_rect,
         head_pct_rect,
         tail_usage_pct_rect: RECT {
-            left: content_left,
+            left: text_left,
             top: usage_bar_top + (usage_bar_h - usage_pct_h) / 2,
-            right: usage_pct_right,
+            right: content_right,
             bottom: usage_bar_top + (usage_bar_h - usage_pct_h) / 2 + usage_pct_h,
         },
         tail_usage_bar_rect: RECT {
-            left: usage_bar_left,
+            left: bar_left,
             top: usage_bar_top,
-            right: usage_bar_right,
+            right: bar_right,
             bottom: usage_bar_top + usage_bar_h,
         },
         tail_time_text_rect: RECT {
-            left: time_text_left,
+            left: text_left,
             top: time_bar_top + (time_bar_h - time_text_h) / 2,
             right: content_right,
             bottom: time_bar_top + (time_bar_h - time_text_h) / 2 + time_text_h,
         },
         tail_time_bar_rect: RECT {
-            left: time_bar_left,
+            left: bar_left,
             top: time_bar_top,
-            right: time_bar_right,
+            right: bar_right,
             bottom: time_bar_top + time_bar_h,
         },
         big_font_px,
@@ -1643,7 +1634,7 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
         };
         draw_text_in_rect(hdc, &layout.head_pct_rect, &pct_text, DT_CENTER);
 
-        // Tail: weekly percent (foreground color, aligned with its usage bar). Skipped
+        // Tail: weekly percent (foreground color, right of its usage bar). Skipped
         // when the layout collapsed the rect at small widths. Foreground —
         // not the accent color the bar uses — because Codex teal #10A37F on
         // the light theme background only hits ~3.2:1 contrast, below WCAG
@@ -1659,7 +1650,7 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
                 }
                 SetTextColor(hdc, COLORREF(color.into_colorref()));
                 let weekly_pct_text = format!("{:.0}%", pct);
-                draw_text_in_rect(hdc, &layout.tail_usage_pct_rect, &weekly_pct_text, DT_CENTER);
+                draw_tail_text_in_rect(hdc, &layout.tail_usage_pct_rect, &weekly_pct_text, DT_RIGHT);
             }
         }
 
@@ -1667,7 +1658,7 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
         SelectObject(hdc, main_font);
         SetTextColor(hdc, COLORREF(text_color.into_colorref()));
         if !inputs.weekly_text.is_empty() {
-            draw_text_in_rect(hdc, &layout.tail_time_text_rect, &inputs.weekly_text, DT_RIGHT);
+            draw_tail_text_in_rect(hdc, &layout.tail_time_text_rect, &inputs.weekly_text, DT_RIGHT);
         }
 
         SelectObject(hdc, prev_font);
@@ -1690,6 +1681,23 @@ fn draw_text_in_rect(hdc: HDC, rect: &RECT, text: &str, halign: DRAW_TEXT_FORMAT
             &mut buf[..len_no_nul],
             &mut r,
             halign | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+        );
+    }
+}
+
+fn draw_tail_text_in_rect(hdc: HDC, rect: &RECT, text: &str, halign: DRAW_TEXT_FORMAT) {
+    if rect.right <= rect.left {
+        return;
+    }
+    let mut buf = wide_str(text);
+    let len_no_nul = buf.len().saturating_sub(1);
+    let mut r = *rect;
+    unsafe {
+        let _ = DrawTextW(
+            hdc,
+            &mut buf[..len_no_nul],
+            &mut r,
+            halign | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
     }
 }
