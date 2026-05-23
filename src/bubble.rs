@@ -974,6 +974,7 @@ struct BubbleLayout {
     head_label_rect: RECT,
     head_pct_rect: RECT,
     tail_label_rect: RECT,
+    tail_pct_rect: RECT,
     tail_bar_rect: RECT,
     tail_countdown_rect: RECT,
     big_font_px: i32,
@@ -1023,13 +1024,30 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
 
     let countdown_w = measure_text_w(mem_dc, COUNTDOWN_TEMPLATE, main_font_px);
     let label_w = measure_text_w(mem_dc, "7d", small_font_px);
+    let pct_reserve_w = measure_text_w(mem_dc, "100%", small_font_px) + scale_to_dpi(2, dpi);
 
     let tail_label_left = tail_left + pad;
     let tail_label_right = tail_label_left + label_w;
     let tail_countdown_right = tail_right;
     let tail_countdown_left = tail_countdown_right - countdown_w;
-    let tail_bar_left = tail_label_right + pad;
-    let tail_bar_right = (tail_countdown_left - pad).max(tail_bar_left + scale_to_dpi(20, dpi));
+
+    // Try to seat a 7d% text between the "7d" label and the bar. If that would
+    // squeeze the bar below the 20-logical minimum, collapse the % rect (zero
+    // width) and fall back to the original label→bar→countdown layout. This
+    // keeps the 140-logical bubble legible without dropping the bar.
+    let bar_min = scale_to_dpi(20, dpi);
+    let (tail_pct_left, tail_pct_right, tail_bar_left) = {
+        let pct_left = tail_label_right + pad;
+        let pct_right = pct_left + pct_reserve_w;
+        let bar_left = pct_right + pad;
+        if (tail_countdown_left - pad) - bar_left >= bar_min {
+            (pct_left, pct_right, bar_left)
+        } else {
+            let bar_left = tail_label_right + pad;
+            (bar_left, bar_left, bar_left)
+        }
+    };
+    let tail_bar_right = (tail_countdown_left - pad).max(tail_bar_left + bar_min);
     let tail_bar_h = scale_to_dpi(5, dpi);
     let tail_bar_top = (height_px - tail_bar_h) / 2;
 
@@ -1048,6 +1066,12 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
             left: tail_label_left,
             top: 0,
             right: tail_label_right,
+            bottom: height_px,
+        },
+        tail_pct_rect: RECT {
+            left: tail_pct_left,
+            top: 0,
+            right: tail_pct_right,
             bottom: height_px,
         },
         tail_bar_rect: RECT {
@@ -1443,9 +1467,24 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
 
         let prev_font = SelectObject(hdc, small_font);
 
-        // Head: "5h" label (muted, centered horizontally).
+        // Head: 5h countdown text if available, otherwise the static "5h" tag.
+        // The ring already signals "this is the 5h window", so the countdown
+        // is the more useful glanceable info when we have it. Fall back to
+        // "5h" when the localized countdown would overflow the rect (e.g.,
+        // wide CJK strings like "999시간" at the 140-logical minimum width) —
+        // DT_NOCLIP would otherwise leak the glyphs onto the ring stroke.
         SetTextColor(hdc, COLORREF(muted_color.into_colorref()));
-        draw_text_in_rect(hdc, &layout.head_label_rect, "5h", DT_CENTER);
+        let head_label_rect_w = layout.head_label_rect.right - layout.head_label_rect.left;
+        let head_label_text: &str = if inputs.session_text.is_empty() {
+            "5h"
+        } else if measure_text_w(hdc, &inputs.session_text, layout.small_font_px)
+            <= head_label_rect_w
+        {
+            inputs.session_text.as_str()
+        } else {
+            "5h"
+        };
+        draw_text_in_rect(hdc, &layout.head_label_rect, head_label_text, DT_CENTER);
 
         // Head: big "X%" glyph centered.
         SelectObject(hdc, big_font);
@@ -1460,6 +1499,25 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
         SelectObject(hdc, small_font);
         SetTextColor(hdc, COLORREF(muted_color.into_colorref()));
         draw_text_in_rect(hdc, &layout.tail_label_rect, "7d", DT_LEFT);
+
+        // Tail: 7d percent (foreground color, between label and bar). Skipped
+        // when the layout collapsed the rect at small widths. Foreground —
+        // not the accent color the bar uses — because Codex teal #10A37F on
+        // the light theme background only hits ~3.2:1 contrast, below WCAG
+        // AA for small text. Adjacency to the bar carries the visual
+        // grouping; we don't need hue to do it too.
+        if let Some(pct) = inputs.weekly_pct {
+            if layout.tail_pct_rect.right > layout.tail_pct_rect.left {
+                let mut color = text_color;
+                if pct >= 95.0 {
+                    let t = pulse_triangle(inputs.pulse_phase);
+                    color = brighten(color, t);
+                }
+                SetTextColor(hdc, COLORREF(color.into_colorref()));
+                let weekly_pct_text = format!("{:.0}%", pct);
+                draw_text_in_rect(hdc, &layout.tail_pct_rect, &weekly_pct_text, DT_CENTER);
+            }
+        }
 
         // Tail: countdown (right-aligned).
         SelectObject(hdc, main_font);
