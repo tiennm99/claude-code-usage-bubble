@@ -28,7 +28,9 @@ self-updater are all written from scratch against the same public APIs
   Codex usage as a percentage and a colored progress ring
 - Drag anywhere — the bubble snaps to monitor work-area edges when
   released
-- Resize with `Ctrl + MouseWheel` on the bubble (32–128 pixels)
+- Resize with `Ctrl + MouseWheel` on the bubble, or use **Controls** →
+  **Make smaller / Make larger / Reset size** from the right-click menu
+  (140–360 logical pixels)
 - Left-click the bubble for an expanded panel with both **5h** and **7d**
   bars plus reset countdowns
 - Right-click for refresh, displayed models, update frequency, language,
@@ -84,10 +86,11 @@ release to snap to the nearest edge if you let go close to one.
 
 - **Left-click** the bubble to open the expanded panel (5h + 7d + countdowns)
 - **Right-click** for refresh, models, refresh frequency, language, "Start
-  with Windows", auto-update check (Disabled / Hourly / Daily / Weekly),
-  manual "Check for updates", exit
+  with Windows", controls, auto-update check (Disabled / Hourly / Daily /
+  Weekly), manual "Check for updates", exit
 - **Drag** anywhere — it floats on top of all other windows
-- **Ctrl + MouseWheel** on the bubble to resize it
+- **Ctrl + MouseWheel** on the bubble, or **Controls** in the right-click
+  menu, to resize it
 - **Tray icon** (if enabled): left-click toggles the bubble visibility,
   right-click opens the same menu
 

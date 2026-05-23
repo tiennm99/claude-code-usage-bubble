@@ -34,6 +34,16 @@ pub struct LocaleStrings {
     pub settings: String,
     pub start_with_windows: String,
     pub reset_position: String,
+    pub size_smaller: String,
+    pub size_larger: String,
+    pub reset_size: String,
+    pub controls: String,
+    pub control_left_click: String,
+    pub control_right_click: String,
+    pub control_drag: String,
+    pub control_ctrl_wheel: String,
+    pub control_tray_click: String,
+    pub tray_left_click: String,
     pub language: String,
     pub system_default: String,
     pub check_for_updates: String,
@@ -158,9 +168,7 @@ impl I18n {
     pub fn set_active(&mut self, requested: Option<&str>) {
         let new_active = requested
             .and_then(|c| normalise(c, &self.available))
-            .or_else(|| {
-                detect::detect_system_locale().and_then(|c| normalise(&c, &self.available))
-            })
+            .or_else(|| detect::detect_system_locale().and_then(|c| normalise(&c, &self.available)))
             .unwrap_or_else(|| FALLBACK_CODE.to_string());
         self.active = new_active;
     }
@@ -183,7 +191,9 @@ fn normalise(input: &str, available: &BTreeMap<String, (String, LocaleStrings)>)
     }
     // Special-case: Traditional Chinese variants → zh-TW
     let lower = cleaned.to_ascii_lowercase();
-    if lower.starts_with("zh") && (lower.contains("tw") || lower.contains("hk") || lower.contains("hant")) {
+    if lower.starts_with("zh")
+        && (lower.contains("tw") || lower.contains("hk") || lower.contains("hant"))
+    {
         if available.contains_key("zh-TW") {
             return Some("zh-TW".to_string());
         }
@@ -192,7 +202,13 @@ fn normalise(input: &str, available: &BTreeMap<String, (String, LocaleStrings)>)
     let prefix = lower.split('-').next().unwrap_or("");
     if !prefix.is_empty() {
         for key in available.keys() {
-            if key.split('-').next().map(str::to_ascii_lowercase).as_deref() == Some(prefix) {
+            if key
+                .split('-')
+                .next()
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+                == Some(prefix)
+            {
                 return Some(key.clone());
             }
         }
@@ -258,4 +274,64 @@ pub fn time_until_display_change(resets_at: Option<SystemTime>) -> Option<Durati
         secs
     };
     Some(Duration::from_secs(secs.saturating_sub(bucket_start) + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_locales_parse_and_include_required_control_strings() {
+        let mut has_fallback = false;
+        for (expected_code, body) in RAW_LOCALES {
+            let file = toml::from_str::<LocaleFile>(body)
+                .unwrap_or_else(|e| panic!("locale {expected_code} failed to parse: {e}"));
+            assert_eq!(file.code, *expected_code);
+            has_fallback |= file.code == FALLBACK_CODE;
+
+            let strings = file.strings;
+            for (name, value) in [
+                ("size_smaller", strings.size_smaller.as_str()),
+                ("size_larger", strings.size_larger.as_str()),
+                ("reset_size", strings.reset_size.as_str()),
+                ("controls", strings.controls.as_str()),
+                ("control_left_click", strings.control_left_click.as_str()),
+                ("control_right_click", strings.control_right_click.as_str()),
+                ("control_drag", strings.control_drag.as_str()),
+                ("control_ctrl_wheel", strings.control_ctrl_wheel.as_str()),
+                ("control_tray_click", strings.control_tray_click.as_str()),
+                ("tray_left_click", strings.tray_left_click.as_str()),
+            ] {
+                assert!(
+                    !value.trim().is_empty(),
+                    "locale {expected_code} has empty {name}"
+                );
+            }
+        }
+        assert!(has_fallback, "fallback locale {FALLBACK_CODE} missing");
+    }
+
+    #[test]
+    fn locale_schema_rejects_missing_or_malformed_control_strings() {
+        let (_, fallback_body) = RAW_LOCALES
+            .iter()
+            .find(|(code, _)| *code == FALLBACK_CODE)
+            .expect("fallback locale fixture must exist");
+
+        let missing_control =
+            fallback_body.replace("tray_left_click = \"Left-click: show/hide\"\n", "");
+        assert!(
+            toml::from_str::<LocaleFile>(&missing_control).is_err(),
+            "missing tray_left_click should fail locale deserialization"
+        );
+
+        let malformed_control = fallback_body.replace(
+            "control_tray_click = \"Tray click: show/hide\"",
+            "control_tray_click = [\"Tray click: show/hide\"]",
+        );
+        assert!(
+            toml::from_str::<LocaleFile>(&malformed_control).is_err(),
+            "malformed control_tray_click should fail locale deserialization"
+        );
+    }
 }

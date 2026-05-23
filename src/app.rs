@@ -70,6 +70,9 @@ const IDM_START_WITH_WINDOWS: u16 = 30;
 const IDM_RESET_POSITION: u16 = 31;
 const IDM_VERSION_ACTION: u16 = 32;
 const IDM_RESTART: u16 = 33;
+const IDM_SIZE_SMALLER: u16 = 34;
+const IDM_SIZE_LARGER: u16 = 35;
+const IDM_RESET_SIZE: u16 = 36;
 const IDM_LANG_SYSTEM: u16 = 40;
 // 50 is reserved by tray::IDM_TOGGLE_WIDGET — keep the auto-update range
 // clear of it (and any future tray ids in the 5x band).
@@ -401,7 +404,7 @@ fn on_bubble_moved(model: ProviderId, pos: (i32, i32)) {
 }
 
 fn on_bubble_resized(_model: ProviderId, size_logical: i32) {
-    update_settings(|s| s.settings.bubble_size_logical = size_logical);
+    set_bubble_size(size_logical);
 }
 
 fn on_menu_command(id: u32, _owner_hwnd: HWND) {
@@ -418,13 +421,14 @@ fn on_menu_command(id: u32, _owner_hwnd: HWND) {
         IDM_START_WITH_WINDOWS => toggle_startup(),
         IDM_RESET_POSITION => reset_positions(),
         IDM_VERSION_ACTION => version_action(),
+        IDM_SIZE_SMALLER => resize_bubbles(-bubble::RESIZE_STEP_LOGICAL),
+        IDM_SIZE_LARGER => resize_bubbles(bubble::RESIZE_STEP_LOGICAL),
+        IDM_RESET_SIZE => set_bubble_size(bubble::DEFAULT_BUBBLE_SIZE),
         IDM_UPDATE_AUTO_OFF => set_update_check_interval(None),
         IDM_UPDATE_AUTO_HOURLY => {
             set_update_check_interval(Some(settings::UPDATE_CHECK_HOURLY_SECS))
         }
-        IDM_UPDATE_AUTO_DAILY => {
-            set_update_check_interval(Some(settings::UPDATE_CHECK_DAILY_SECS))
-        }
+        IDM_UPDATE_AUTO_DAILY => set_update_check_interval(Some(settings::UPDATE_CHECK_DAILY_SECS)),
         IDM_UPDATE_AUTO_WEEKLY => {
             set_update_check_interval(Some(settings::UPDATE_CHECK_WEEKLY_SECS))
         }
@@ -759,14 +763,7 @@ fn refresh_tray_icons_with(snap: &UiSnapshot) {
             } else {
                 None
             },
-            tooltip: format!(
-                "{} {}: {} | {}: {}",
-                snap.i18n_strings.claude_label,
-                snap.i18n_strings.session_window,
-                entry.map(|e| e.primary_text.as_str()).unwrap_or(""),
-                snap.i18n_strings.weekly_window,
-                entry.map(|e| e.secondary_text.as_str()).unwrap_or(""),
-            ),
+            tooltip: tray_tooltip(&snap.i18n_strings.claude_label, entry, &snap.i18n_strings),
         });
     }
     if snap.settings.show_codex {
@@ -778,17 +775,25 @@ fn refresh_tray_icons_with(snap: &UiSnapshot) {
             } else {
                 None
             },
-            tooltip: format!(
-                "{} {}: {} | {}: {}",
-                snap.i18n_strings.chatgpt_label,
-                snap.i18n_strings.session_window,
-                entry.map(|e| e.primary_text.as_str()).unwrap_or(""),
-                snap.i18n_strings.weekly_window,
-                entry.map(|e| e.secondary_text.as_str()).unwrap_or(""),
-            ),
+            tooltip: tray_tooltip(&snap.i18n_strings.chatgpt_label, entry, &snap.i18n_strings),
         });
     }
     tray::sync(snap.msg_hwnd.to_hwnd(), &icons);
+}
+
+fn tray_tooltip(label: &str, entry: Option<&ProviderUiState>, strings: &LocaleStrings) -> String {
+    let session = entry
+        .map(|e| e.primary_text.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("...");
+    let weekly = entry
+        .map(|e| e.secondary_text.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("...");
+    format!(
+        "{label}\n{}: {session}\n{}: {weekly}\n{}",
+        strings.session_window, strings.weekly_window, strings.tray_left_click
+    )
 }
 
 fn handle_tray_action(action: TrayAction) {
@@ -926,6 +931,7 @@ struct ContextMenuSnapshot {
     widget_visible: bool,
     install_channel: InstallChannel,
     update_status: UpdateStatus,
+    bubble_size_logical: i32,
 }
 
 fn show_context_menu(owner_hwnd: HWND) {
@@ -945,6 +951,7 @@ fn show_context_menu(owner_hwnd: HWND) {
             widget_visible: s.settings.widget_visible,
             install_channel: s.install_channel,
             update_status: s.update_status,
+            bubble_size_logical: s.settings.bubble_size_logical,
         },
         None => return,
     };
@@ -986,13 +993,21 @@ fn show_context_menu(owner_hwnd: HWND) {
             models,
             IDM_MODEL_CLAUDE,
             &snap.strings.claude_label,
-            if snap.show_claude { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
+            if snap.show_claude {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
         );
         append_item(
             models,
             IDM_MODEL_CHATGPT,
             &snap.strings.chatgpt_label,
-            if snap.show_chatgpt { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
+            if snap.show_chatgpt {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
         );
         append_submenu(menu, models, &snap.strings.models);
 
@@ -1005,7 +1020,11 @@ fn show_context_menu(owner_hwnd: HWND) {
             settings_menu,
             IDM_START_WITH_WINDOWS,
             &snap.strings.start_with_windows,
-            if is_startup_enabled() { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
+            if is_startup_enabled() {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
         );
         append_item(
             settings_menu,
@@ -1024,7 +1043,11 @@ fn show_context_menu(owner_hwnd: HWND) {
             lang,
             IDM_LANG_SYSTEM,
             &snap.strings.system_default,
-            if snap.language_override.is_none() { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
+            if snap.language_override.is_none() {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
         );
         for (i, (code, name)) in snap.available.iter().enumerate() {
             let id = IDM_LANG_BASE + i as u16;
@@ -1052,7 +1075,12 @@ fn show_context_menu(owner_hwnd: HWND) {
         } else {
             MENU_ITEM_FLAGS(0)
         };
-        append_item(settings_menu, IDM_VERSION_ACTION, &version_label, version_flags);
+        append_item(
+            settings_menu,
+            IDM_VERSION_ACTION,
+            &version_label,
+            version_flags,
+        );
 
         let Ok(auto_update) = CreatePopupMenu() else {
             log::error!("CreatePopupMenu(auto_update) failed");
@@ -1088,11 +1116,58 @@ fn show_context_menu(owner_hwnd: HWND) {
         append_submenu(settings_menu, auto_update, &snap.strings.auto_update_check);
         append_submenu(menu, settings_menu, &snap.strings.settings);
 
+        let Ok(controls) = CreatePopupMenu() else {
+            log::error!("CreatePopupMenu(controls) failed");
+            let _ = DestroyMenu(menu);
+            return;
+        };
+        append_item(
+            controls,
+            IDM_SIZE_SMALLER,
+            &snap.strings.size_smaller,
+            if snap.bubble_size_logical <= bubble::MIN_BUBBLE_SIZE {
+                MF_GRAYED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
+        );
+        append_item(
+            controls,
+            IDM_SIZE_LARGER,
+            &snap.strings.size_larger,
+            if snap.bubble_size_logical >= bubble::MAX_BUBBLE_SIZE {
+                MF_GRAYED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
+        );
+        append_item(
+            controls,
+            IDM_RESET_SIZE,
+            &snap.strings.reset_size,
+            if snap.bubble_size_logical == bubble::DEFAULT_BUBBLE_SIZE {
+                MF_GRAYED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
+        );
+        let _ = AppendMenuW(controls, MF_SEPARATOR, 0, PCWSTR::null());
+        append_item(controls, 0, &snap.strings.control_left_click, MF_GRAYED);
+        append_item(controls, 0, &snap.strings.control_right_click, MF_GRAYED);
+        append_item(controls, 0, &snap.strings.control_drag, MF_GRAYED);
+        append_item(controls, 0, &snap.strings.control_ctrl_wheel, MF_GRAYED);
+        append_item(controls, 0, &snap.strings.control_tray_click, MF_GRAYED);
+        append_submenu(menu, controls, &snap.strings.controls);
+
         append_item(
             menu,
             tray::IDM_TOGGLE_WIDGET,
             &snap.strings.show_widget,
-            if snap.widget_visible { MF_CHECKED } else { MENU_ITEM_FLAGS(0) },
+            if snap.widget_visible {
+                MF_CHECKED
+            } else {
+                MENU_ITEM_FLAGS(0)
+            },
         );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_item(menu, IDM_RESTART, &snap.strings.restart, MENU_ITEM_FLAGS(0));
@@ -1116,7 +1191,12 @@ fn append_item(menu: HMENU, id: u16, label: &str, flags: MENU_ITEM_FLAGS) {
 fn append_submenu(menu: HMENU, submenu: HMENU, label: &str) {
     let w = os::to_utf16_nul(label);
     unsafe {
-        let _ = AppendMenuW(menu, MF_POPUP, submenu.0 as usize, PCWSTR::from_raw(w.as_ptr()));
+        let _ = AppendMenuW(
+            menu,
+            MF_POPUP,
+            submenu.0 as usize,
+            PCWSTR::from_raw(w.as_ptr()),
+        );
     }
 }
 
@@ -1181,7 +1261,9 @@ fn toggle_model(model: ProviderId) {
         ProviderId::Claude => settings.show_claude_code,
         ProviderId::ChatGpt => settings.show_codex,
     };
-    let existing = lock_state().as_ref().and_then(|s| s.bubbles.get(&model).copied());
+    let existing = lock_state()
+        .as_ref()
+        .and_then(|s| s.bubbles.get(&model).copied());
     match (want, existing) {
         (true, None) => spawn_bubble(model, &settings, is_dark),
         (false, Some(h)) => {
@@ -1242,6 +1324,34 @@ fn reset_positions() {
     // staleness.
     propagate_to_ui();
     spawn_poll_thread();
+}
+
+fn resize_bubbles(delta: i32) {
+    let current = lock_state()
+        .as_ref()
+        .map(|s| s.settings.bubble_size_logical)
+        .unwrap_or(bubble::DEFAULT_BUBBLE_SIZE);
+    set_bubble_size(current + delta);
+}
+
+fn set_bubble_size(size_logical: i32) {
+    let (hwnds, snap) = {
+        let mut s = lock_state();
+        let Some(s) = s.as_mut() else {
+            return;
+        };
+        let new_size = size_logical.clamp(bubble::MIN_BUBBLE_SIZE, bubble::MAX_BUBBLE_SIZE);
+        if new_size == s.settings.bubble_size_logical {
+            return;
+        }
+        s.settings.bubble_size_logical = new_size;
+        let hwnds = s.bubbles.values().map(|h| h.to_hwnd()).collect::<Vec<_>>();
+        (hwnds, s.settings.clone())
+    };
+    settings::save(&snap);
+    for hwnd in hwnds {
+        bubble::set_size_logical(hwnd, snap.bubble_size_logical);
+    }
 }
 
 fn set_language(_dummy: Option<()>) {

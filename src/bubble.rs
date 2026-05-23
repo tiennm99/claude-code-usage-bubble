@@ -44,7 +44,7 @@ use crate::usage::ProviderId;
 pub const MIN_BUBBLE_SIZE: i32 = 140;
 pub const MAX_BUBBLE_SIZE: i32 = 360;
 pub const DEFAULT_BUBBLE_SIZE: i32 = 200;
-const RESIZE_STEP: i32 = 20;
+pub const RESIZE_STEP_LOGICAL: i32 = 20;
 const SNAP_ZONE_LOGICAL: i32 = 12;
 const CORNER_SNAP_ZONE_LOGICAL: i32 = 32;
 const CORNER_INSET_LOGICAL: i32 = 12;
@@ -137,9 +137,7 @@ pub fn register_class() {
 /// message-loop dispatch.
 pub fn create(config: BubbleConfig) -> HWND {
     register_class();
-    let initial_size_logical = config
-        .size_logical
-        .clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
+    let initial_size_logical = config.size_logical.clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
     let dpi_for_create = crate::os::dpi::for_system();
     let width_px = scale_to_dpi(initial_size_logical, dpi_for_create);
     let height_px = scale_to_dpi(bubble_height_logical(initial_size_logical), dpi_for_create);
@@ -366,9 +364,7 @@ pub fn position(hwnd: HWND) -> Option<(i32, i32)> {
 }
 
 pub fn model(hwnd: HWND) -> Option<ProviderId> {
-    lock_bubbles()
-        .get(&(hwnd.0 as isize))
-        .map(|b| b.model)
+    lock_bubbles().get(&(hwnd.0 as isize)).map(|b| b.model)
 }
 
 pub fn size_logical(hwnd: HWND) -> Option<i32> {
@@ -468,7 +464,11 @@ unsafe extern "system" fn wnd_proc(
             const MK_CONTROL: u32 = 0x0008;
             if modifiers & MK_CONTROL != 0 {
                 let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
-                let step = if delta > 0 { RESIZE_STEP } else { -RESIZE_STEP };
+                let step = if delta > 0 {
+                    RESIZE_STEP_LOGICAL
+                } else {
+                    -RESIZE_STEP_LOGICAL
+                };
                 resize_step(hwnd, step);
                 LRESULT(0)
             } else {
@@ -583,12 +583,19 @@ fn lparam_to_point(lparam: LPARAM) -> POINT {
 // ---------- Resize / snap ----------
 
 fn resize_step(hwnd: HWND, delta: i32) {
+    let Some(current) = size_logical(hwnd) else {
+        return;
+    };
+    set_size_logical(hwnd, current + delta);
+}
+
+pub fn set_size_logical(hwnd: HWND, size_logical: i32) {
     let (new_logical, dpi) = {
         let mut bubbles = lock_bubbles();
         let Some(b) = bubbles.get_mut(&(hwnd.0 as isize)) else {
             return;
         };
-        let new_logical = (b.size_logical + delta).clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
+        let new_logical = size_logical.clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
         if new_logical == b.size_logical {
             return;
         }
@@ -1022,8 +1029,7 @@ fn compute_bubble_layout(size_logical: i32, dpi: u32, mem_dc: HDC) -> BubbleLayo
     let tail_countdown_right = tail_right;
     let tail_countdown_left = tail_countdown_right - countdown_w;
     let tail_bar_left = tail_label_right + pad;
-    let tail_bar_right =
-        (tail_countdown_left - pad).max(tail_bar_left + scale_to_dpi(20, dpi));
+    let tail_bar_right = (tail_countdown_left - pad).max(tail_bar_left + scale_to_dpi(20, dpi));
     let tail_bar_h = scale_to_dpi(5, dpi);
     let tail_bar_top = (height_px - tail_bar_h) / 2;
 
@@ -1119,7 +1125,8 @@ fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pi
         if let Some(pct) = inputs.session_pct {
             let sweep = (pct.clamp(0.0, 100.0) / 100.0) as f32;
             if sweep > 0.0 {
-                let mut color = crate::usage_color::bar_fill_color(inputs.model, inputs.is_dark, pct);
+                let mut color =
+                    crate::usage_color::bar_fill_color(inputs.model, inputs.is_dark, pct);
                 if pct >= 95.0 {
                     let t = pulse_triangle(inputs.pulse_phase);
                     color = brighten(color, t);
@@ -1325,8 +1332,8 @@ fn render(hwnd: HWND) {
             ..Default::default()
         };
         let mut bits: *mut c_void = std::ptr::null_mut();
-        let dib = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-            .unwrap_or_default();
+        let dib =
+            CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
         if dib.is_invalid() || bits.is_null() {
             let _ = DeleteDC(mem_dc);
             ReleaseDC(hwnd, screen_dc);
@@ -1458,7 +1465,12 @@ fn paint_bubble_text(hdc: HDC, layout: &BubbleLayout, inputs: &PaintInputs) {
         SelectObject(hdc, main_font);
         SetTextColor(hdc, COLORREF(text_color.into_colorref()));
         if !inputs.weekly_text.is_empty() {
-            draw_text_in_rect(hdc, &layout.tail_countdown_rect, &inputs.weekly_text, DT_RIGHT);
+            draw_text_in_rect(
+                hdc,
+                &layout.tail_countdown_rect,
+                &inputs.weekly_text,
+                DT_RIGHT,
+            );
         }
 
         SelectObject(hdc, prev_font);
