@@ -1288,9 +1288,12 @@ fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pi
                 let mut stroke = Stroke::default();
                 stroke.width = layout.time_ring_stroke_w;
                 stroke.line_cap = LineCap::Round;
-                if let Some(path) =
-                    build_arc(layout.ring_cx, layout.ring_cy, layout.time_ring_radius, frac)
-                {
+                if let Some(path) = build_remaining_arc(
+                    layout.ring_cx,
+                    layout.ring_cy,
+                    layout.time_ring_radius,
+                    frac,
+                ) {
                     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
                 }
             }
@@ -1338,9 +1341,11 @@ fn paint_bubble_pixmap(layout: &BubbleLayout, inputs: &PaintInputs) -> Option<Pi
                 inputs.weekly_resets_at,
                 window_duration_secs(inputs.model, UsageWindowKind::Secondary),
             ) {
-                let fill_w = bar_w * frac;
+                let fill_w = (bar_w * frac).min(bar_w);
                 if fill_w > 0.0 {
-                    paint_pill(&mut pixmap, bar_x, bar_y, fill_w.min(bar_w), bar_h, cap, time_fill);
+                    // Anchor on the right edge so the bar shrinks toward the right as time passes.
+                    let fill_x = bar_x + bar_w - fill_w;
+                    paint_pill(&mut pixmap, fill_x, bar_y, fill_w, bar_h, cap, time_fill);
                 }
             }
         }
@@ -1377,6 +1382,34 @@ fn build_arc(cx: f32, cy: f32, radius: f32, sweep_fraction: f32) -> Option<tiny_
     let mut pb = PathBuilder::new();
     let start_angle: f32 = -std::f32::consts::FRAC_PI_2;
     let total = sweep_fraction * std::f32::consts::TAU;
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let a = start_angle + t * total;
+        let x = cx + a.cos() * radius;
+        let y = cy + a.sin() * radius;
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    pb.finish()
+}
+
+/// Clockwise arc that ENDS at 12 o'clock; the consumed wedge grows clockwise
+/// from 12 as `remaining_fraction` shrinks, mirroring a clock-hand countdown.
+fn build_remaining_arc(
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    remaining_fraction: f32,
+) -> Option<tiny_skia::Path> {
+    let frac = remaining_fraction.clamp(0.0, 1.0);
+    let segments = ((frac * 64.0).ceil() as usize).max(1);
+    let mut pb = PathBuilder::new();
+    let twelve: f32 = -std::f32::consts::FRAC_PI_2;
+    let total = frac * std::f32::consts::TAU;
+    let start_angle = twelve + (std::f32::consts::TAU - total);
     for i in 0..=segments {
         let t = i as f32 / segments as f32;
         let a = start_angle + t * total;
