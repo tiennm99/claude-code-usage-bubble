@@ -5,20 +5,27 @@
 use crate::os::Rgb as Color;
 use crate::usage::ProviderId;
 
-/// Per-provider identity color. Claude = warm orange `#D97757`. Codex =
-/// OpenAI brand teal `#10A37F`, used consistently across dark and light
-/// themes so the badge/bubble/panel never disagree on Codex identity.
-pub fn accent_color_for(model: ProviderId, _is_dark: bool) -> Color {
+/// Per-provider identity color. Claude = warm orange `#D97757`. Codex tracks
+/// the OpenAI Codex monochrome palette — near-white `#E5E5E5` on dark themes,
+/// near-black `#1A1A1A` on light — so the accent stays readable against both
+/// the dark bubble surface and the `#F3F3F3` light background.
+pub fn accent_color_for(model: ProviderId, is_dark: bool) -> Color {
     match model {
         ProviderId::Claude => Color::from_hex("#D97757"),
-        ProviderId::ChatGpt => Color::from_hex("#10A37F"),
+        ProviderId::ChatGpt => {
+            if is_dark {
+                Color::from_hex("#E5E5E5")
+            } else {
+                Color::from_hex("#1A1A1A")
+            }
+        }
     }
 }
 
 /// Discrete 4-band fill color. The "safe" band uses the provider's identity
-/// color so Codex bars stay white-on-dark while Claude bars stay orange; the
-/// warning bands are theme-aware so light-mode amber stays readable against
-/// the `#F3F3F3` background.
+/// color so Codex bars render monochrome (light-on-dark / dark-on-light) while
+/// Claude bars stay orange; the warning bands are theme-aware so light-mode
+/// amber stays readable against the `#F3F3F3` background.
 ///
 /// - <60%   → provider accent
 /// - 60–80% → amber (dark `#E0A040`, light `#B47A20` for WCAG AA contrast)
