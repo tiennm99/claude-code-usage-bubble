@@ -673,12 +673,19 @@ pub fn move_all_to_defaults(app: &AppHandle) {
     };
     let size_logical = runtime.with_state(|s| s.settings.bubble_size_logical);
     for (provider, window) in windows(app) {
-        let (w, h) = geom::bubble_size_px(size_logical, dpi_of(&window));
-        set_position(
-            &window,
-            geom::default_position(primary.work, w, h, provider),
-        );
+        let placement = reset_placement(provider, size_logical, primary);
+        // Move first so a DPI-change resize from crossing monitors happens
+        // before the explicit size, then re-place at the final size.
+        set_position(&window, placement.pos);
+        set_size(&window, placement.size);
+        set_position(&window, placement.pos);
     }
+}
+
+/// Where Reset position puts a bubble: the default spot on the primary
+/// screen, sized for the primary's DPI whatever screen the bubble is on now.
+fn reset_placement(provider: ProviderId, size_logical: i32, primary: Screen) -> Placement {
+    initial_placement(provider, size_logical, None, &[primary], primary)
 }
 
 /// Move-end detection where the OS reports no end of a window drag: a
@@ -877,6 +884,34 @@ mod tests {
             PRIMARY,
         );
         assert_eq!(codex.pos, Point::new(1720, 974 - 66 - 24));
+    }
+
+    #[test]
+    fn reset_placement_is_sized_for_the_primary_dpi() {
+        let hidpi_primary = screen(
+            Rect::new(0, 0, 2880, 1620),
+            Rect::new(0, 0, 2880, 1560),
+            144,
+        );
+        let claude = reset_placement(ProviderId::Claude, 200, hidpi_primary);
+        assert_eq!(
+            claude,
+            Placement {
+                pos: Point::new(2880 - 300 - 24, 1560 - 99 - 24),
+                size: (300, 99),
+                dpi: 144,
+            }
+        );
+        let codex = reset_placement(ProviderId::ChatGpt, 200, hidpi_primary);
+        assert_eq!(codex.size, (300, 99));
+        assert_eq!(codex.pos, Point::new(2556, 1560 - 99 - 24 - 99 - 24));
+        // Fully inside the work area and clear of the Claude bubble.
+        assert!(claude.pos.x + claude.size.0 <= 2880);
+        assert!(codex.pos.y + codex.size.1 < claude.pos.y);
+
+        let low_dpi = reset_placement(ProviderId::Claude, 200, PRIMARY);
+        assert_eq!(low_dpi.size, (200, 66));
+        assert_eq!(low_dpi.pos, Point::new(1920 - 200 - 24, 1040 - 66 - 24));
     }
 
     #[test]
