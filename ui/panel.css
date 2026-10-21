@@ -1,0 +1,100 @@
+/*
+ * Details panel, 280x120 logical px, laid out on the GDI panel's exact
+ * coordinates. The webview zoom scales it to the monitor DPI. Accent and
+ * fill colours come from the payload. No transitions, no pulse.
+ */
+:root[data-theme='dark'] {
+  --bg: #1f1f1f;
+  --text: #eaeaea;
+  --track: #3a3a3a;
+}
+
+:root[data-theme='light'] {
+  --bg: #fafafa;
+  --text: #1f1f1f;
+  --track: #d6d6d6;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.stripe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 4px;
+  height: 100%;
+}
+
+/* One line, vertically centred, clipped at the box edge without an ellipsis. */
+.text {
+  position: absolute;
+  height: 18px;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 18px;
+  white-space: pre;
+  text-overflow: clip;
+}
+
+.header {
+  left: 14px;
+  top: 14px;
+  width: 252px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.row {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 14px;
+}
+
+.row.session {
+  top: 38px;
+}
+
+.row.weekly {
+  top: 68px;
+}
+
+.row-label {
+  left: 14px;
+  top: -2px;
+  width: 28px;
+}
+
+.bar {
+  position: absolute;
+  left: 46px;
+  top: 0;
+  width: 120px;
+  height: 14px;
+  overflow: hidden;
+  background: var(--track);
+}
+
+.fill {
+  width: 0;
+  height: 100%;
+}
+
+.row-text {
+  left: 174px;
+  top: -2px;
+  width: 96px;
+}
