@@ -1,27 +1,25 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8">
     <title>Claude Code Usage Bubble</title>
-    <style>
-      html,
-      body {
-        margin: 0;
-        background: #1f1f1f;
-        color: #eaeaea;
-        font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace;
-      }
-
-      pre {
-        margin: 0;
-        padding: 8px;
-        white-space: pre-wrap;
-        word-break: break-word;
-      }
-    </style>
+    <link rel="stylesheet" href="bubble.css">
     <script type="module" src="bubble.js"></script>
   </head>
   <body>
-    <pre id="payload">Waiting for the first payload...</pre>
+    <div class="pill" id="pill">
+      <svg class="rings" id="rings" aria-hidden="true">
+        <circle class="ring-track" id="ring-track"></circle>
+        <circle class="ring-arc" id="ring-arc"></circle>
+        <circle class="time-ring-track" id="time-ring-track"></circle>
+        <circle class="time-ring-arc" id="time-ring-arc"></circle>
+      </svg>
+      <div class="text head-label" id="head-label"></div>
+      <div class="text head-pct" id="head-pct"></div>
+      <div class="bar usage-bar" id="usage-bar"><div class="fill usage-fill" id="usage-fill"></div></div>
+      <div class="bar time-bar" id="time-bar"><div class="fill time-fill" id="time-fill"></div></div>
+      <div class="text tail-pct" id="tail-pct"></div>
+      <div class="text tail-time" id="tail-time"></div>
+    </div>
   </body>
 </html>

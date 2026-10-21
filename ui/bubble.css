@@ -1,0 +1,144 @@
+/* Bubble palette. Accent and fill colours come from the payload. */
+:root[data-theme='dark'] {
+  --bg: #1f1f1f;
+  --track: #2c2c2c;
+  --time-track: #404040;
+  --time-fill: #b0b0b0;
+  --text: #eaeaea;
+  --muted: #a8a8a8;
+}
+
+:root[data-theme='light'] {
+  --bg: #f3f3f3;
+  --track: #e2e2e2;
+  --time-track: #e0e0e0;
+  --time-fill: #666666;
+  --text: #1f1f1f;
+  --muted: #5e5e5e;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  /* Only the pill takes input: the transparent stadium corners are dead. */
+  pointer-events: none;
+}
+
+.pill {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: var(--bg);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  cursor: move;
+  pointer-events: auto;
+}
+
+/* Every pointer event targets the pill itself, whose hit area follows its
+   rounded outline. */
+.pill * {
+  pointer-events: none;
+}
+
+.rings {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.rings circle {
+  fill: none;
+}
+
+.ring-track {
+  stroke: var(--track);
+}
+
+.time-ring-track {
+  stroke: var(--time-track);
+}
+
+.time-ring-arc {
+  stroke: var(--time-fill);
+}
+
+.ring-arc,
+.time-ring-arc {
+  stroke-linecap: round;
+}
+
+.text {
+  position: absolute;
+  margin: 0;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.head-label {
+  font-weight: 600;
+  color: var(--muted);
+  text-align: center;
+}
+
+.head-pct {
+  font-weight: 700;
+  text-align: center;
+}
+
+.tail-pct,
+.tail-time {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+}
+
+.tail-pct {
+  font-weight: 600;
+}
+
+.tail-time {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.bar {
+  position: absolute;
+  overflow: hidden;
+  border-radius: 9999px;
+}
+
+.usage-bar {
+  background: var(--track);
+}
+
+.time-bar {
+  background: var(--time-track);
+}
+
+.fill {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 9999px;
+}
+
+.usage-fill {
+  left: 0;
+}
+
+.time-fill {
+  right: 0;
+  background: var(--time-fill);
+}
+
+[hidden] {
+  display: none !important;
+}
