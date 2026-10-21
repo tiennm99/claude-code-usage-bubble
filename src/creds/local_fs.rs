@@ -1,8 +1,8 @@
-// Read Claude credentials from the Windows user profile.
+// Read Claude credentials from the user's home directory.
 //
-// Path: `%USERPROFILE%\.claude\.credentials.json` (matches what the
-// official Claude CLI writes). Schema: `{ "claudeAiOauth": { "accessToken",
-// "expiresAt": <ms-since-epoch> } }`.
+// Path: `~/.claude/.credentials.json`, `%USERPROFILE%\.claude\.credentials.json`
+// on Windows (matches what the official Claude CLI writes). Schema:
+// `{ "claudeAiOauth": { "accessToken", "expiresAt": <ms-since-epoch> } }`.
 
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
