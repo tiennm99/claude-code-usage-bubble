@@ -1,7 +1,7 @@
 ---
 phase: 9
 title: "Updater"
-status: pending
+status: in-progress
 priority: P1
 effort: "4h"
 dependencies: [5]
@@ -93,6 +93,32 @@ self-replaces on Windows and runs the plugin's install on the AppImage.
 4. Verify in the pinned plugin source that the builder timeout is applied to the
    download request; if it is not, a single builder with the 30 s timeout is
    enough and step "Apply" drops the second check. Record the finding here.
+
+## Todo
+
+- [ ] Step 1, user action: generate the key pair (`npx tauri signer generate`), put the public key in `tauri.conf.json` `plugins.updater.pubkey` (empty until then), store `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` as GitHub secrets and keep an offline backup
+- [x] `tauri-plugin-updater = "2"` registered in `src/runtime.rs` in the same commit as `plugins.updater` (`pubkey`, `endpoints`) in `tauri.conf.json`; `createUpdaterArtifacts` stays `false`; no capability added
+- [x] `src/core/version.rs`: suffix-ignoring `Version` and `newer`, used as the plugin's `version_comparator`
+- [x] Check: 30 s timeout, Windows system proxy unless an env proxy is set (skipped when an update host is in the bypass list), `TargetNotFound`/`TargetsNotFound` map to Up to date, `last_update_check_unix` saved on every check, then `UpdateCheckDone`
+- [x] Apply: `Portable` stages `updates/update.exe`, runs `ensure_writable`, `reject_unsafe_path` and `self_replace`, deletes the stage; `AppImage` runs the plugin `install`; both relaunch with `--updated-to X.Y.Z` and exit only on `Ok`; a relaunch failure sets Failed and writes `update-error.log`
+- [x] `PackageManager` and `Unsupported` channels: the check runs, "Update available" is greyed (`MenuInput::update_can_apply`)
+- [x] Plugin errors mapped onto `update::Error`; apply failures write `update-error.log` in the existing format
+- [x] Removed `src/update/release.rs`, the WinHTTP download, the `--apply-update` helper, `parse_sha256_digest` and the `sha2` dependency
+- [x] Tests: version (`v1.2.3-rc1` = 1.2.3, `v1` = 1.0.0, `abc` = 0.0.0, no downgrade), channel detection, staging and log paths, stage-and-swap, error mapping and `TargetNotFound` to Up to date, update proxy bypass, plugin config parse
+- [x] Step 3: signature check verified in the pinned plugin source and by running its tamper tests (see notes)
+- [x] Step 4: builder timeout vs download verified in the pinned plugin source (see notes)
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (216 passed, 1 ignored), `cargo test -- version:: update::` (18 passed), `npm run lint`, `npm test` (37 passed), `npm run tauri build -- --no-bundle`
+- [ ] Linux desktop (X11) manual check below
+
+## Implementation notes
+
+- **Step 3 (signature):** in `tauri-plugin-updater` 2.14.0, `Update::download` ends with `self.verify(&buffer)?`, which runs `minisign_verify::PublicKey::verify` against the configured `pubkey` before any bytes are returned, and `Update::install` verifies again. The plugin's own offline tests (`verifies_cached_bytes_and_rejects_tampering`, `install_rejects_bytes_that_do_not_match_the_signature`, plus the signed-version ones) were run on this host against the pinned source and pass: tampered bytes, a tampered signature, an invalid signature and a different key are all rejected. No separate `minisign-verify` call is needed.
+- **Step 4 (timeout):** the builder timeout does **not** reach the download. `Updater::update_from_release` builds every `Update` with `timeout: None`, so `download()` would run without any limit. Following the phase, apply drops the second builder and the second `check()`: it downloads the `Update` the last check found, after setting its public `timeout` field to 10 min (`update::DOWNLOAD_TIMEOUT`). The found update is kept in `Runtime::pending_update`, outside the state lock, as v0.5.0 kept its release.
+- **Public key:** the agent could not generate the signing key (key generation is the user action in step 1, and it was refused here as credential handling). `plugins.updater.pubkey` is therefore an empty string, which the plugin accepts at registration: checks work, and a download fails signature verification, so nothing unverified is ever installed. `build.rs` refuses to build when `TAURI_SIGNING_PRIVATE_KEY` is set and the effective `pubkey` (file or `--config`) is empty, so a signed release cannot ship without it.
+- **Proxy:** the plugin's reqwest reads env proxies itself, so the parsed system proxy is passed only when no env proxy is set. `Proxy::all` cannot bypass per host, so it is skipped when `github.com` or a GitHub release-asset host is in `ProxyOverride`; reqwest's own system-proxy support then routes those requests.
+- **Error log:** only apply failures write `update-error.log`, as in v0.5.0; check failures are logged under `--diagnose` only, so a transient network error never overwrites the record of a failed swap.
+- **Concurrency:** check and apply claim their status under the state lock (`Idle/UpToDate/Available/Failed` to `Checking`, `Available` to `Applying`), so a scheduled check cannot run alongside an apply. A scheduled check that fires during an apply re-arms the schedule instead of being lost.
+- Not enabled: `requireSignedVersion` would also bind the announced version to the signature. It needs every published signature to carry `version:` in its trusted comment, which Phase 10's signing step would have to guarantee.
 
 ## Validation
 
