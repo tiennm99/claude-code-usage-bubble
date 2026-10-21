@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Claude Code Usage Bubble",
+  "mainBinaryName": "claude-code-usage-bubble",
+  "identifier": "io.github.tiennm99.claudecodeusagebubble",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "deb"],
+    "createUpdaterArtifacts": false,
+    "copyright": "Copyright (C) 2026 tiennm99",
+    "publisher": "tiennm99",
+    "icon": []
+  }
+}
