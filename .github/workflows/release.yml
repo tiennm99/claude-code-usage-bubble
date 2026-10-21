@@ -45,6 +45,17 @@ jobs:
           }
           Write-Host "Cargo version $cargoVersion matches tag $tag"
 
+      # An exe without the updater public key can never verify, and so never
+      # install, a later update; every install of it would be stranded.
+      - name: Refuse an empty updater public key
+        shell: pwsh
+        run: |
+          $pubkey = (Get-Content tauri.conf.json -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          if ([string]::IsNullOrWhiteSpace($pubkey)) {
+            Write-Error "plugins.updater.pubkey in tauri.conf.json is empty: put the updater public key there before releasing."
+            exit 1
+          }
+
       - name: Build release
         run: cargo build --release --locked
 

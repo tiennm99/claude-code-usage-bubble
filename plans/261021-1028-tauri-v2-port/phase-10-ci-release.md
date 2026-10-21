@@ -32,6 +32,10 @@ host has no patchelf and no display.
     `--config '{"bundle":{"createUpdaterArtifacts":true}}'` where bundles are
     built, with `TAURI_SIGNING_PRIVATE_KEY` and `_PASSWORD` in the environment.
     A signing step fails hard when the key variable is empty.
+  - Keep the step that fails before any build when `plugins.updater.pubkey` in
+    `tauri.conf.json` is empty. `build.rs` only checks the key when
+    `TAURI_SIGNING_PRIVATE_KEY` is in the build environment, so it does not
+    cover a build step that runs without it.
   - **win-x64** job (`windows-latest`):
     - `npm run tauri build -- --no-bundle`.
     - `npx tauri signer sign target/release/claude-code-usage-bubble.exe`. This
