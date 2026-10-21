@@ -87,7 +87,7 @@ only two Win32 couplings: `src/net/winhttp.rs`, and the `CommandExt` import in
   rather than passed to ureq, which without `socks-proxy` fails every request
   for `socks5h` and silently connects directly for `socks5`; skipping lets an
   HTTP env proxy or the system proxy take over. `Client::system_proxy()`
-  exposes the system proxy in use for the updater `Client::system_proxy()` exposes the one in use for the updater
+  exposes the system proxy in use for the updater
   builder in Phase 09. Proxy URLs are never logged (they may hold
   credentials).
 - An empty `CODEX_HOME` now counts as unset, as in the Codex CLI. Before, it
