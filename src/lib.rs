@@ -3,9 +3,11 @@
 //! The binary in `src/main.rs` only calls [`run`]. Every module is `pub` so
 //! that items wired up incrementally do not trip `dead_code`.
 
+pub mod cli;
 pub mod core;
 pub mod creds;
 pub mod diag;
+pub mod handoff;
 pub mod net;
 pub mod platform;
 pub mod usage;
