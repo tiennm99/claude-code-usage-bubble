@@ -1,6 +1,11 @@
 // English UI strings and formatting helpers.
+//
+// Every string the UI displays is formatted here; the webview never formats
+// a number for display.
 
 use std::time::{Duration, SystemTime};
+
+use crate::usage::{ProviderId, Window};
 
 /// The strings every UI module needs.
 #[derive(Clone, Debug)]
@@ -18,6 +23,7 @@ pub struct LocaleStrings {
     pub opencode_go_label: String,
     pub settings: String,
     pub start_with_windows: String,
+    pub start_at_login: String,
     pub reset_position: String,
     pub size_smaller: String,
     pub size_larger: String,
@@ -85,6 +91,26 @@ impl I18n {
     }
 }
 
+impl LocaleStrings {
+    /// Label of the autostart menu item for the platform this build targets.
+    pub fn autostart_label(&self) -> &str {
+        if cfg!(windows) {
+            &self.start_with_windows
+        } else {
+            &self.start_at_login
+        }
+    }
+
+    /// Display name of a provider.
+    pub fn provider_label(&self, provider: ProviderId) -> &str {
+        match provider {
+            ProviderId::Claude => &self.claude_label,
+            ProviderId::ChatGpt => &self.chatgpt_label,
+            ProviderId::OpenCodeGo => &self.opencode_go_label,
+        }
+    }
+}
+
 fn english_strings() -> LocaleStrings {
     LocaleStrings {
         window_title: "Claude Code Usage Bubble".into(),
@@ -100,6 +126,7 @@ fn english_strings() -> LocaleStrings {
         opencode_go_label: "OpenCode Go".into(),
         settings: "Settings".into(),
         start_with_windows: "Start with Windows".into(),
+        start_at_login: "Start at login".into(),
         reset_position: "Reset position".into(),
         size_smaller: "Make smaller".into(),
         size_larger: "Make larger".into(),
@@ -147,11 +174,24 @@ fn english_strings() -> LocaleStrings {
 
 // ---------- Free-function helpers ----------
 
+/// A percentage rounded half-to-even (`"72%"`), or `"—"` when there is none.
+pub fn format_pct(pct: Option<f64>) -> String {
+    match pct {
+        Some(p) => format!("{p:.0}%"),
+        None => String::from("\u{2014}"),
+    }
+}
+
 /// Format a `usage::Window` percentage + countdown as `"73% · 2h"`-style text.
 /// Returns just the percentage when no reset time is available.
-pub fn format_window(window: &crate::usage::Window, strings: &LocaleStrings) -> String {
+pub fn format_window(window: &Window, strings: &LocaleStrings) -> String {
+    format_window_at(window, strings, SystemTime::now())
+}
+
+/// [`format_window`] evaluated at `now`.
+pub fn format_window_at(window: &Window, strings: &LocaleStrings, now: SystemTime) -> String {
     let pct = format!("{:.0}%", window.utilization);
-    let cd = format_countdown(window.resets_at, strings);
+    let cd = format_countdown_at(window.resets_at, strings, now);
     if cd.is_empty() {
         pct
     } else {
@@ -162,10 +202,19 @@ pub fn format_window(window: &crate::usage::Window, strings: &LocaleStrings) -> 
 /// Countdown only — used by the bubble, which renders the percent inside the
 /// bar fill and only needs the time-to-reset on the right.
 pub fn format_countdown(resets_at: Option<SystemTime>, strings: &LocaleStrings) -> String {
+    format_countdown_at(resets_at, strings, SystemTime::now())
+}
+
+/// [`format_countdown`] evaluated at `now`.
+pub fn format_countdown_at(
+    resets_at: Option<SystemTime>,
+    strings: &LocaleStrings,
+    now: SystemTime,
+) -> String {
     let Some(reset) = resets_at else {
         return String::new();
     };
-    let remaining = match reset.duration_since(SystemTime::now()) {
+    let remaining = match reset.duration_since(now) {
         Ok(d) => d,
         Err(_) => return strings.now.clone(),
     };
@@ -190,8 +239,16 @@ fn format_countdown_secs(total_secs: u64, strings: &LocaleStrings) -> String {
 /// How long before `format_window`'s string would change.
 /// Used by the countdown timer to refresh exactly when needed.
 pub fn time_until_display_change(resets_at: Option<SystemTime>) -> Option<Duration> {
+    time_until_display_change_at(resets_at, SystemTime::now())
+}
+
+/// [`time_until_display_change`] evaluated at `now`.
+pub fn time_until_display_change_at(
+    resets_at: Option<SystemTime>,
+    now: SystemTime,
+) -> Option<Duration> {
     let reset = resets_at?;
-    let remaining = reset.duration_since(SystemTime::now()).ok()?;
+    let remaining = reset.duration_since(now).ok()?;
     let secs = remaining.as_secs();
     let bucket_start = if secs / 86_400 >= 1 {
         (secs / 86_400) * 86_400
@@ -229,5 +286,86 @@ mod tests {
         ] {
             assert!(!value.trim().is_empty(), "empty string: {name}");
         }
+    }
+
+    fn at(now: SystemTime, secs: u64) -> Option<SystemTime> {
+        Some(now + Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn countdown_buckets() {
+        let s = english_strings();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let cd = |secs| format_countdown_at(at(now, secs), &s, now);
+        assert_eq!(format_countdown_at(None, &s, now), "");
+        assert_eq!(
+            format_countdown_at(Some(now - Duration::from_secs(1)), &s, now),
+            "now"
+        );
+        assert_eq!(cd(0), "0s");
+        assert_eq!(cd(59), "59s");
+        assert_eq!(cd(60), "1m");
+        assert_eq!(cd(3_599), "59m");
+        assert_eq!(cd(3_600), "1h");
+        assert_eq!(cd(86_399), "23h");
+        assert_eq!(cd(86_400), "1d");
+        assert_eq!(cd(86_400 + 23 * 3_600), "1d");
+        assert_eq!(cd(7 * 86_400), "7d");
+    }
+
+    #[test]
+    fn window_text_joins_percent_and_countdown() {
+        let s = english_strings();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let w = Window {
+            utilization: 73.2,
+            resets_at: at(now, 2 * 3_600 + 5),
+        };
+        assert_eq!(format_window_at(&w, &s, now), "73% \u{00b7} 2h");
+        let bare = Window {
+            utilization: 73.2,
+            resets_at: None,
+        };
+        assert_eq!(format_window_at(&bare, &s, now), "73%");
+    }
+
+    #[test]
+    fn display_change_fires_just_past_the_bucket_edge() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let ttl = |secs| time_until_display_change_at(at(now, secs), now);
+        assert_eq!(time_until_display_change_at(None, now), None);
+        assert_eq!(
+            time_until_display_change_at(Some(now - Duration::from_secs(5)), now),
+            None
+        );
+        // 1d 23h: "1d" stays until 23h + 1s from now.
+        assert_eq!(
+            ttl(86_400 + 23 * 3_600),
+            Some(Duration::from_secs(23 * 3_600 + 1))
+        );
+        assert_eq!(ttl(2 * 3_600 + 30), Some(Duration::from_secs(31)));
+        assert_eq!(ttl(5 * 60 + 7), Some(Duration::from_secs(8)));
+        // Under a minute the text changes every second.
+        assert_eq!(ttl(42), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn percent_rounds_half_to_even() {
+        assert_eq!(format_pct(Some(72.5)), "72%");
+        assert_eq!(format_pct(Some(73.5)), "74%");
+        assert_eq!(format_pct(Some(0.0)), "0%");
+        assert_eq!(format_pct(None), "\u{2014}");
+    }
+
+    #[test]
+    fn autostart_label_matches_the_platform() {
+        let s = english_strings();
+        let expected = if cfg!(windows) {
+            "Start with Windows"
+        } else {
+            "Start at login"
+        };
+        assert_eq!(s.autostart_label(), expected);
+        assert_eq!(s.provider_label(ProviderId::ChatGpt), "Codex");
     }
 }

@@ -2,10 +2,17 @@
 
 use std::time::SystemTime;
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+use serde::Serialize;
+
+/// Serialises as its [`slug`](ProviderId::slug), which also names the
+/// provider's bubble window and tray icon.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize)]
 pub enum ProviderId {
+    #[serde(rename = "claude")]
     Claude,
+    #[serde(rename = "chatgpt")]
     ChatGpt,
+    #[serde(rename = "opencode-go")]
     OpenCodeGo,
 }
 
@@ -19,6 +26,11 @@ impl ProviderId {
             Self::ChatGpt => "chatgpt",
             Self::OpenCodeGo => "opencode-go",
         }
+    }
+
+    /// Inverse of [`slug`](ProviderId::slug).
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.slug() == slug)
     }
 
     pub fn metadata(self) -> ProviderMetadata {
@@ -86,4 +98,20 @@ pub struct UsageWindows {
 pub struct ProviderSnapshot {
     pub id: ProviderId,
     pub windows: UsageWindows,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialises_as_slug_and_parses_back() {
+        for provider in ProviderId::ALL {
+            let json = serde_json::to_string(&provider).expect("serialise");
+            assert_eq!(json, format!("\"{}\"", provider.slug()));
+            assert_eq!(ProviderId::from_slug(provider.slug()), Some(provider));
+            assert_eq!(provider.metadata().slug, provider.slug());
+        }
+        assert_eq!(ProviderId::from_slug("codex"), None);
+    }
 }

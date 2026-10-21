@@ -2,7 +2,7 @@
 // and the tray badge. Keeping the function in one place ensures the three
 // surfaces never disagree about what "78% used" looks like.
 
-use crate::os::Rgb as Color;
+use crate::core::color::Rgb as Color;
 use crate::usage::ProviderId;
 
 /// Per-provider identity color. Claude = warm orange `#D97757`. Codex tracks
@@ -45,5 +45,39 @@ pub fn bar_fill_color(model: ProviderId, is_dark: bool, percent: f64) -> Color {
         Color::from_hex("#C45020")
     } else {
         Color::from_hex("#A01818")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(model: ProviderId, is_dark: bool, pct: f64) -> String {
+        bar_fill_color(model, is_dark, pct).to_hex()
+    }
+
+    #[test]
+    fn fill_band_edges() {
+        let c = ProviderId::Claude;
+        assert_eq!(hex(c, true, 59.9), "#D97757");
+        assert_eq!(hex(c, true, 60.0), "#E0A040");
+        assert_eq!(hex(c, false, 60.0), "#B47A20");
+        assert_eq!(hex(c, true, 79.9), "#E0A040");
+        assert_eq!(hex(c, false, 79.9), "#B47A20");
+        assert_eq!(hex(c, true, 80.0), "#C45020");
+        assert_eq!(hex(c, false, 94.9), "#C45020");
+        assert_eq!(hex(c, true, 95.0), "#A01818");
+        assert_eq!(hex(c, false, 100.0), "#A01818");
+    }
+
+    #[test]
+    fn safe_band_uses_theme_aware_accent() {
+        assert_eq!(hex(ProviderId::ChatGpt, true, 10.0), "#E5E5E5");
+        assert_eq!(hex(ProviderId::ChatGpt, false, 10.0), "#1A1A1A");
+        assert_eq!(hex(ProviderId::OpenCodeGo, false, 0.0), "#3BAE75");
+        assert_eq!(
+            accent_color_for(ProviderId::Claude, false),
+            accent_color_for(ProviderId::Claude, true)
+        );
     }
 }
