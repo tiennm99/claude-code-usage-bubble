@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Scaffold Tauri crate, JS toolchain and CI"
-status: pending
+status: completed
 priority: P1
 effort: "5h"
 dependencies: []
@@ -106,6 +106,38 @@ stay on disk until the phase that replaces each one deletes it.
 4. Generate icons. Verify that `tauri-build` embeds the icon, a VERSIONINFO built from the Cargo version, and a PerMonitorV2 manifest.
 5. Run `npx tauri info` to confirm the CLI resolves a root-level `tauri.conf.json`.
 6. Add `ci.yml`, run `actionlint` and `yamllint`, push to `feat/tauri-port` and make all three rows green.
+
+## Todo
+
+- [x] npm toolchain: `package.json`, `package-lock.json`, `eslint.config.js`, `tests/js/.gitkeep`
+- [x] `tauri.conf.json`, `capabilities/default.json`, `.taurignore`, `.gitignore`
+- [x] `src/lib.rs` (`diag`, `run()`, test window, D18 exit handling) and the `src/main.rs` shim; Win32 modules out of the module tree
+- [x] Icons generated, `icons/icon.ico` replaced by `src/icons/icon.ico`; `res/icon.rc` deleted
+- [x] `tauri-build` embeds the icon, VERSIONINFO from the Cargo version and a PerMonitorV2 manifest
+- [x] `npx tauri info` resolves the root-level `tauri.conf.json`
+- [x] `ci.yml` passes `actionlint` and `yamllint`; all three rows green with a `bubble-exe-<sha>` artifact
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle`
+- [ ] Windows manual check: the CI exe starts and shows the test window (needs a Windows machine)
+
+## Implementation notes
+
+- `windows` is `0.62` and `webview2-com` is `0.39`, the majors tauri 2.12 pulls
+  (`cargo tree -i windows` shows a single copy). `webview2-com` is a direct
+  dependency because tauri does not re-export it.
+- `x11rb` is `0.14` and `libloading` is `0.9`, the current releases.
+- Actions use their current majors: `actions/checkout@v7`,
+  `actions/setup-node@v7`, `actions/upload-artifact@v7`.
+- `tauri-build` writes VERSIONINFO only from the config `version`, which D16
+  leaves out. `build.rs` merges the Cargo version into `TAURI_CONFIG` before
+  `try_build`, keeping any CLI `--config` override. The Windows CI row asserts
+  that the exe `ProductVersion` equals the `Cargo.toml` version.
+- The default tauri manifest has no DPI awareness, so
+  `res/windows-app-manifest.xml` keeps its Common-Controls v6 dependency and
+  adds `PerMonitorV2`.
+- Only desktop icons are kept: the mobile (`android/`, `ios/`) and Windows
+  Store (`Square*Logo.png`, `StoreLogo.png`) outputs of `tauri icon` are unused.
+- The test window (`bubble-test`) exits the app on close, since D18 keeps the
+  process alive after its last window is destroyed.
 
 ## Validation
 
