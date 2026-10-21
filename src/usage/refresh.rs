@@ -146,9 +146,25 @@ fn command_for(name: &str, args: &[&str]) -> Option<Command> {
     let path_var = std::env::var_os("PATH");
     let home = dirs::home_dir();
     let dirs = search_dirs(path_var.as_deref(), home.as_deref());
-    let program = find_executable(name, &dirs)?;
+    command_in(name, args, &dirs)
+}
+
+/// Resolve `name` in `dirs` and run it with `PATH` set to the same list.
+/// npm-installed CLIs are `#!/usr/bin/env node` scripts, so the child has to
+/// see the extra install directories too: a GUI session's short `PATH`
+/// would let the script start and then exit at once with "node not found".
+#[cfg(unix)]
+fn command_in(name: &str, args: &[&str], dirs: &[std::path::PathBuf]) -> Option<Command> {
+    let program = find_executable(name, dirs)?;
+    let path = match std::env::join_paths(dirs) {
+        Ok(path) => path,
+        Err(err) => {
+            log::warn!("refresh CLI search path cannot be joined: {err}");
+            return None;
+        }
+    };
     let mut cmd = Command::new(program);
-    cmd.args(args);
+    cmd.args(args).env("PATH", path);
     Some(cmd)
 }
 
@@ -290,5 +306,45 @@ mod tests {
         assert_eq!(written.trim(), "-p .");
         assert!(!spawn_first(&["definitely-not-a-cli-name"], &[]));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn child_path_resolves_env_interpreter_from_extra_dirs() {
+        let tools = temp_dir("tools");
+        let bin = temp_dir("bin");
+        let marker = bin.join("ran");
+        let helper = "ccub-fake-interpreter";
+        std::fs::write(
+            tools.join(helper),
+            format!("#!/bin/sh\necho interpreted > '{}'\n", marker.display()),
+        )
+        .expect("write helper");
+        std::fs::set_permissions(tools.join(helper), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod helper");
+        std::fs::write(bin.join("fake-cli"), format!("#!/usr/bin/env {helper}\n"))
+            .expect("write script");
+        std::fs::set_permissions(bin.join("fake-cli"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        let dirs = vec![
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            bin.clone(),
+            tools.clone(),
+        ];
+        let mut cmd = command_in("fake-cli", &[], &dirs).expect("script is found");
+        let status = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("script runs");
+        assert!(status.success(), "child exited with {status}");
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+            "interpreted"
+        );
+        assert!(command_in("absent-cli", &[], &dirs).is_none());
+        let _ = std::fs::remove_dir_all(tools);
+        let _ = std::fs::remove_dir_all(bin);
     }
 }

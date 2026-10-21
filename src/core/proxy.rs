@@ -41,7 +41,8 @@ pub fn from_registry_values(
 ///
 /// A per-scheme value (`http=h:p;https=h:p;…`) uses the `https=` entry, else
 /// the `http=` entry. A bare `h:p` applies to every scheme. The result always
-/// carries a scheme, defaulting to `http://` (a CONNECT proxy).
+/// carries a scheme, defaulting to `http://` (a CONNECT proxy). Only `http`
+/// and `https` proxies are accepted; any other scheme yields `None`.
 pub fn parse_proxy_server(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -64,10 +65,15 @@ pub fn parse_proxy_server(value: &str) -> Option<String> {
     } else {
         value
     };
-    if target.contains("://") {
-        Some(target.to_string())
-    } else {
-        Some(format!("http://{target}"))
+    match target.split_once("://") {
+        None => Some(format!("http://{target}")),
+        Some((scheme, _))
+            if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") =>
+        {
+            Some(target.to_string())
+        }
+        // SOCKS and any other scheme are not supported as a system proxy.
+        Some(_) => None,
     }
 }
 
@@ -160,6 +166,21 @@ mod tests {
             Some("http://proxy.corp:8080")
         );
         assert_eq!(parse_proxy_server("   "), None);
+    }
+
+    #[test]
+    fn non_http_proxy_schemes_are_rejected() {
+        assert_eq!(parse_proxy_server("socks5://h:1"), None);
+        assert_eq!(parse_proxy_server("https=socks5://h:1"), None);
+        assert_eq!(parse_proxy_server("SOCKS4://h:1"), None);
+        assert_eq!(
+            parse_proxy_server("HTTPS://h:1").as_deref(),
+            Some("HTTPS://h:1")
+        );
+        assert_eq!(
+            from_registry_values(Some(1), Some("socks5://h:1"), None),
+            None
+        );
     }
 
     #[test]

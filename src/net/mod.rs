@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use ureq::http::{self, Uri};
 use ureq::tls::{RootCerts, TlsConfig};
-use ureq::{Agent, Proxy};
+use ureq::{Agent, Proxy, ProxyProtocol};
 
 use crate::core::proxy::SystemProxy;
 
@@ -99,6 +99,13 @@ impl Client {
         let direct = make_agent(user_agent, env_proxy);
         let proxied = match system {
             Some(proxy) => match Proxy::new(&proxy.url) {
+                // Without ureq's `socks-proxy` feature a manually configured
+                // SOCKS proxy panics at connect time, so only CONNECT proxies
+                // are accepted here.
+                Ok(p) if !matches!(p.protocol(), ProxyProtocol::Http | ProxyProtocol::Https) => {
+                    log::warn!("system proxy ignored, only http and https proxies are supported");
+                    None
+                }
                 Ok(p) => Some(Proxied {
                     agent: make_agent(user_agent, Some(p)),
                     proxy,
@@ -419,6 +426,20 @@ mod tests {
             None,
             Some(SystemProxy {
                 url: "http://bad host:notaport".into(),
+                bypass: Vec::new(),
+            }),
+        )
+        .expect("client");
+        assert_eq!(client.system_proxy(), None);
+    }
+
+    #[test]
+    fn socks_system_proxy_falls_back_to_direct() {
+        let client = Client::build(
+            USER_AGENT,
+            None,
+            Some(SystemProxy {
+                url: "socks5://127.0.0.1:1080".into(),
                 bypass: Vec::new(),
             }),
         )
