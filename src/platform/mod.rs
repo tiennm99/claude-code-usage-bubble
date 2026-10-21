@@ -112,6 +112,52 @@ pub fn primary_button_down() -> bool {
     }
 }
 
+/// The result of one fullscreen check: whether a fullscreen window of
+/// another process is in the foreground, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FullscreenCheck {
+    pub fullscreen: bool,
+    pub reason: &'static str,
+    /// The window and geometry behind the decision for the diagnostic log;
+    /// empty when there is nothing to add.
+    pub detail: String,
+}
+
+impl FullscreenCheck {
+    pub fn new(fullscreen: bool, reason: &'static str) -> Self {
+        Self {
+            fullscreen,
+            reason,
+            detail: String::new(),
+        }
+    }
+}
+
+/// Whether the foreground window is a fullscreen window that is not ours.
+/// Native Wayland and macOS cannot tell and always report false.
+pub fn foreground_is_fullscreen() -> FullscreenCheck {
+    #[cfg(windows)]
+    {
+        windows::foreground_is_fullscreen()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if positioning_supported() {
+            linux::foreground_is_fullscreen()
+        } else {
+            FullscreenCheck::new(false, "native Wayland cannot report the foreground")
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::foreground_is_fullscreen()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        FullscreenCheck::new(false, "unsupported platform")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

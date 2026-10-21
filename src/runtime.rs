@@ -31,7 +31,7 @@ use crate::menu::{self, MenuCache, MenuSnapshot};
 use crate::scheduler::{self, Action, Message, SchedulerHost};
 use crate::tray::{self, Trays};
 use crate::usage::{self, refresh, ProviderId, Registry};
-use crate::{bubble, diag, handoff, net, panel, platform};
+use crate::{bubble, diag, fullscreen, handoff, net, panel, platform};
 
 /// Event carrying a [`BubblePayload`] to a bubble webview.
 pub const BUBBLE_UPDATE_EVENT: &str = "bubble:update";
@@ -821,6 +821,11 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
     // The thread is detached; it stops on `Message::Shutdown` at exit.
     scheduler::spawn(config, rx, Arc::clone(&runtime))?;
     runtime.send(Message::PollNow);
+
+    // Without the thread the bubbles just stay up over fullscreen apps.
+    if let Err(err) = fullscreen::spawn(Arc::clone(&runtime)) {
+        log::error!("fullscreen check thread could not start: {err}");
+    }
 
     for provider in providers {
         bubble::create(app.handle(), provider)?;

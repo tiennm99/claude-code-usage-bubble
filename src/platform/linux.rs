@@ -4,8 +4,10 @@ use std::ffi::OsString;
 use std::sync::OnceLock;
 
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConnectionExt, KeyButMask, Window};
+use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt, KeyButMask, Window};
 use x11rb::rust_connection::RustConnection;
+
+use super::FullscreenCheck;
 
 /// The AppIndicator libraries the tray backend loads, in its own order. The
 /// unversioned names come from the backend's `backcompat` feature (on by
@@ -106,6 +108,112 @@ pub fn button1_down() -> bool {
     }
 }
 
+x11rb::atom_manager! {
+    /// The EWMH atoms the fullscreen check reads.
+    FullscreenAtoms: FullscreenAtomsCookie {
+        _NET_ACTIVE_WINDOW,
+        _NET_WM_STATE,
+        _NET_WM_STATE_FULLSCREEN,
+        _NET_WM_STATE_HIDDEN,
+        _NET_WM_PID,
+    }
+}
+
+/// The fullscreen atoms on the shared connection, interned on first use;
+/// `None` without X11 or when interning failed (then it is not retried).
+fn fullscreen_atoms() -> Option<(&'static X11, FullscreenAtoms)> {
+    static ATOMS: OnceLock<Option<FullscreenAtoms>> = OnceLock::new();
+    let x11 = x11()?;
+    let atoms = ATOMS.get_or_init(|| {
+        let atoms = FullscreenAtoms::new(&x11.conn)
+            .map_err(|err| err.to_string())
+            .and_then(|cookie| cookie.reply().map_err(|err| err.to_string()));
+        match atoms {
+            Ok(atoms) => Some(atoms),
+            Err(err) => {
+                log::warn!("EWMH atoms could not be interned: {err}");
+                None
+            }
+        }
+    });
+    atoms.map(|atoms| (x11, atoms))
+}
+
+/// The 32-bit values of `property` on `window`, at most `max` of them.
+/// Empty when the property is missing or has another type or format.
+fn property32(
+    x11: &X11,
+    window: Window,
+    property: Atom,
+    kind: AtomEnum,
+    max: u32,
+) -> Result<Vec<u32>, String> {
+    let reply = x11
+        .conn
+        .get_property(false, window, property, kind, 0, max)
+        .map_err(|err| err.to_string())?
+        .reply()
+        .map_err(|err| err.to_string())?;
+    Ok(reply.value32().map(Iterator::collect).unwrap_or_default())
+}
+
+/// Whether the EWMH active window is fullscreen and belongs to another
+/// process. False without X11, without an active window or when a query
+/// fails (a window can vanish between the reads).
+pub fn foreground_is_fullscreen() -> FullscreenCheck {
+    let Some((x11, atoms)) = fullscreen_atoms() else {
+        return FullscreenCheck::new(false, "no X11 connection");
+    };
+    let active = match property32(x11, x11.root, atoms._NET_ACTIVE_WINDOW, AtomEnum::WINDOW, 1) {
+        Ok(values) => values.first().copied().unwrap_or(0),
+        Err(err) => {
+            log::debug!("_NET_ACTIVE_WINDOW unreadable: {err}");
+            return FullscreenCheck::new(false, "active window unreadable");
+        }
+    };
+    if active == 0 {
+        return FullscreenCheck::new(false, "no active window");
+    }
+    let state = property32(x11, active, atoms._NET_WM_STATE, AtomEnum::ATOM, 64);
+    let pid = property32(x11, active, atoms._NET_WM_PID, AtomEnum::CARDINAL, 1);
+    let (state, pid) = match (state, pid) {
+        (Ok(state), Ok(pid)) => (state, pid.first().copied()),
+        (Err(err), _) | (_, Err(err)) => {
+            log::debug!("state of window 0x{active:X} unreadable: {err}");
+            return FullscreenCheck::new(false, "active window unreadable");
+        }
+    };
+    let (fullscreen, reason) = evaluate_active_window(&state, &atoms, pid, std::process::id());
+    FullscreenCheck {
+        fullscreen,
+        reason,
+        detail: format!(
+            "window=0x{active:X} pid={}",
+            pid.map_or_else(|| "<none>".to_string(), |p| p.to_string())
+        ),
+    }
+}
+
+/// The decision for the active window from its `_NET_WM_STATE` atoms and
+/// `_NET_WM_PID`: fullscreen, not minimized, and not one of our windows.
+fn evaluate_active_window(
+    state: &[Atom],
+    atoms: &FullscreenAtoms,
+    window_pid: Option<u32>,
+    own_pid: u32,
+) -> (bool, &'static str) {
+    if window_pid == Some(own_pid) {
+        return (false, "foreground window is ours");
+    }
+    if state.contains(&atoms._NET_WM_STATE_HIDDEN) {
+        return (false, "foreground minimized");
+    }
+    if !state.contains(&atoms._NET_WM_STATE_FULLSCREEN) {
+        return (false, "foreground not fullscreen");
+    }
+    (true, "foreground fullscreen")
+}
+
 /// How long the portal settings read may block.
 const PORTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -175,6 +283,44 @@ mod tests {
         assert!(!positioning_supported(os("wayland-0"), os("wayland")));
         assert!(!positioning_supported(os("wayland-0"), os("wayland,x11")));
         assert!(!positioning_supported(None, os("broadway")));
+    }
+
+    const ATOMS: FullscreenAtoms = FullscreenAtoms {
+        _NET_ACTIVE_WINDOW: 1,
+        _NET_WM_STATE: 2,
+        _NET_WM_STATE_FULLSCREEN: 3,
+        _NET_WM_STATE_HIDDEN: 4,
+        _NET_WM_PID: 5,
+    };
+    const ABOVE: Atom = 99;
+
+    #[test]
+    fn fullscreen_needs_the_state_atom_on_a_window_of_another_process() {
+        let fs = ATOMS._NET_WM_STATE_FULLSCREEN;
+        assert_eq!(
+            evaluate_active_window(&[ABOVE, fs], &ATOMS, Some(42), 7),
+            (true, "foreground fullscreen")
+        );
+        // A window without `_NET_WM_PID` cannot be ours.
+        assert!(evaluate_active_window(&[fs], &ATOMS, None, 7).0);
+        assert_eq!(
+            evaluate_active_window(&[ABOVE], &ATOMS, Some(42), 7),
+            (false, "foreground not fullscreen")
+        );
+        assert!(!evaluate_active_window(&[], &ATOMS, Some(42), 7).0);
+    }
+
+    #[test]
+    fn our_own_and_minimized_windows_never_count_as_fullscreen() {
+        let fs = ATOMS._NET_WM_STATE_FULLSCREEN;
+        assert_eq!(
+            evaluate_active_window(&[fs], &ATOMS, Some(7), 7),
+            (false, "foreground window is ours")
+        );
+        assert_eq!(
+            evaluate_active_window(&[fs, ATOMS._NET_WM_STATE_HIDDEN], &ATOMS, Some(42), 7),
+            (false, "foreground minimized")
+        );
     }
 
     #[test]

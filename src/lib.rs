@@ -10,6 +10,7 @@ pub mod commands;
 pub mod core;
 pub mod creds;
 pub mod diag;
+pub mod fullscreen;
 pub mod handoff;
 pub mod menu;
 pub mod net;

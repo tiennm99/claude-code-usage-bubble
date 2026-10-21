@@ -7,3 +7,10 @@
 pub fn primary_button_down() -> bool {
     false
 }
+
+/// Whether a fullscreen window of another app is frontmost. Always false
+/// for now; `CGWindowListCopyWindowInfo` with the on-screen window list
+/// (layer 0, bounds covering a display, owner PID not ours) would answer it.
+pub fn foreground_is_fullscreen() -> super::FullscreenCheck {
+    super::FullscreenCheck::new(false, "not implemented on macOS")
+}

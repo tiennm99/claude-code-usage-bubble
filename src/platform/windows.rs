@@ -9,11 +9,15 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, SetLastError, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
+    CloseHandle, GetLastError, SetLastError, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0,
+    WIN32_ERROR, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    DWM_WINDOW_CORNER_PREFERENCE,
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWM_WINDOW_CORNER_PREFERENCE,
+};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::Shell::{
@@ -22,14 +26,15 @@ use windows::Win32::UI::Shell::{
     ABE_TOP, ABM_GETTASKBARPOS, APPBARDATA,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, MessageBoxW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, GWL_EXSTYLE, MA_NOACTIVATE, MB_ICONERROR, MB_OK, MB_SETFOREGROUND,
+    GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, MessageBoxW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, GWL_EXSTYLE, GWL_STYLE, MA_NOACTIVATE, MB_ICONERROR, MB_OK, MB_SETFOREGROUND,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
     SW_SHOWNOACTIVATE, WM_DISPLAYCHANGE, WM_EXITSIZEMOVE, WM_MOUSEACTIVATE, WM_NCDESTROY,
     WM_SETTINGCHANGE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 
-use crate::core::geom::{Edge, Rect};
+use crate::core::geom::{self, Edge, Rect};
 use crate::core::proxy::{self, SystemProxy};
 
 const INTERNET_SETTINGS_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
@@ -421,9 +426,237 @@ pub fn set_foreground(window: &tauri::WebviewWindow) {
     }
 }
 
+// ---------- Fullscreen detection ----------
+
+/// Shell windows that cover a monitor without being a fullscreen app.
+const IGNORED_FULLSCREEN_CLASSES: [&str; 3] = ["Progman", "WorkerW", "Shell_TrayWnd"];
+
+struct FullscreenEvaluation {
+    is_fullscreen: bool,
+    hwnd: HWND,
+    class_name: String,
+    bounds: Option<Rect>,
+    bounds_source: &'static str,
+    monitor: Option<Rect>,
+    reason: &'static str,
+}
+
+/// Whether the foreground window covers its whole monitor as a fullscreen
+/// app: not a window of this process (bubbles, panel, popup menu, WebView
+/// children), not a shell window, visible, not minimized or cloaked, its
+/// visible bounds within 2 px of the monitor rect and its style borderless
+/// or popup.
+pub fn foreground_is_fullscreen() -> super::FullscreenCheck {
+    // SAFETY: plain FFI call with no arguments.
+    let fg = unsafe { GetForegroundWindow() };
+    let evaluation = evaluate_foreground_fullscreen(fg);
+    super::FullscreenCheck {
+        fullscreen: evaluation.is_fullscreen,
+        reason: evaluation.reason,
+        detail: format!(
+            "fg=0x{:X} class={} bounds_source={} bounds={} monitor={}",
+            evaluation.hwnd.0 as usize,
+            if evaluation.class_name.is_empty() {
+                "<unknown>"
+            } else {
+                evaluation.class_name.as_str()
+            },
+            evaluation.bounds_source,
+            format_rect(evaluation.bounds.as_ref()),
+            format_rect(evaluation.monitor.as_ref()),
+        ),
+    }
+}
+
+fn evaluate_foreground_fullscreen(fg: HWND) -> FullscreenEvaluation {
+    let mut evaluation = FullscreenEvaluation {
+        is_fullscreen: false,
+        hwnd: fg,
+        class_name: String::new(),
+        bounds: None,
+        bounds_source: "none",
+        monitor: None,
+        reason: "not evaluated",
+    };
+
+    if fg.is_invalid() {
+        evaluation.reason = "no foreground window";
+        return evaluation;
+    }
+
+    evaluation.class_name = window_class_name(fg);
+    if window_process_id(fg) == Some(std::process::id()) {
+        evaluation.reason = "foreground window is ours";
+        return evaluation;
+    }
+    if is_ignored_fullscreen_class(&evaluation.class_name) {
+        evaluation.reason = "ignored foreground class";
+        return evaluation;
+    }
+    // SAFETY: plain queries on a window handle; a stale one returns false.
+    if unsafe { !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() } {
+        evaluation.reason = "foreground invisible or minimized";
+        return evaluation;
+    }
+    if is_dwm_cloaked(fg) {
+        evaluation.reason = "foreground cloaked";
+        return evaluation;
+    }
+
+    let Some((bounds, source)) = visible_window_bounds(fg) else {
+        evaluation.reason = "foreground bounds unavailable";
+        return evaluation;
+    };
+    evaluation.bounds = Some(bounds);
+    evaluation.bounds_source = source;
+
+    // SAFETY: as above; NEAREST always yields a monitor for a live window.
+    let monitor = unsafe { MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_invalid() {
+        evaluation.reason = "foreground monitor unavailable";
+        return evaluation;
+    }
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a correctly sized MONITORINFO.
+    if unsafe { !GetMonitorInfoW(monitor, &mut info).as_bool() } {
+        evaluation.reason = "foreground monitor info unavailable";
+        return evaluation;
+    }
+    let monitor = rect_from(&info.rcMonitor);
+    evaluation.monitor = Some(monitor);
+
+    if !geom::rect_covers_monitor(&bounds, &monitor) {
+        evaluation.reason = "visible bounds do not cover monitor";
+        return evaluation;
+    }
+
+    if !window_style_allows_fullscreen(fg) {
+        evaluation.reason = "standard framed window";
+        return evaluation;
+    }
+
+    evaluation.is_fullscreen = true;
+    evaluation.reason = "visible bounds cover monitor";
+    evaluation
+}
+
+/// The id of the process that created `hwnd`; `None` for a stale handle.
+fn window_process_id(hwnd: HWND) -> Option<u32> {
+    let mut pid = 0u32;
+    // SAFETY: `pid` outlives the call; a stale handle returns thread id 0.
+    let thread = unsafe { GetWindowThreadProcessId(hwnd, Some(std::ptr::from_mut(&mut pid))) };
+    (thread != 0).then_some(pid)
+}
+
+/// The visible bounds of `hwnd`: the DWM extended frame (without the
+/// invisible resize borders), else the window rect.
+fn visible_window_bounds(hwnd: HWND) -> Option<(Rect, &'static str)> {
+    let mut rect = RECT::default();
+    // SAFETY: the pointer and size describe `rect`, which outlives the call.
+    let dwm_ok = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            std::ptr::from_mut(&mut rect).cast(),
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .is_ok()
+    };
+    if dwm_ok && !rect_is_empty(&rect) {
+        return Some((rect_from(&rect), "dwm-extended-frame"));
+    }
+
+    // SAFETY: as above.
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return None;
+    }
+    if rect_is_empty(&rect) {
+        None
+    } else {
+        Some((rect_from(&rect), "window-rect"))
+    }
+}
+
+/// Whether DWM cloaks `hwnd` (a suspended UWP app or a window on another
+/// virtual desktop).
+fn is_dwm_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked = 0u32;
+    // SAFETY: the pointer and size describe `cloaked`, which outlives the call.
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            std::ptr::from_mut(&mut cloaked).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+        .is_ok()
+            && cloaked != 0
+    }
+}
+
+fn window_class_name(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    // SAFETY: the slice bounds the write.
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+    match usize::try_from(len) {
+        Ok(len) if len > 0 => String::from_utf16_lossy(&buf[..len]),
+        _ => String::new(),
+    }
+}
+
+fn is_ignored_fullscreen_class(class_name: &str) -> bool {
+    IGNORED_FULLSCREEN_CLASSES
+        .iter()
+        .any(|ignored| class_name.eq_ignore_ascii_case(ignored))
+}
+
+fn window_style_allows_fullscreen(hwnd: HWND) -> bool {
+    // SAFETY: a zero style is only an error when the last error is set,
+    // so it is cleared first.
+    unsafe { SetLastError(WIN32_ERROR(0)) };
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+    if style == 0 && unsafe { GetLastError() } != WIN32_ERROR(0) {
+        return false;
+    }
+    // The style is a 32-bit value in a pointer-sized return.
+    geom::window_style_bits_allow_fullscreen(style as u32)
+}
+
+fn rect_from(rect: &RECT) -> Rect {
+    Rect::new(rect.left, rect.top, rect.right, rect.bottom)
+}
+
+fn rect_is_empty(rect: &RECT) -> bool {
+    rect.right <= rect.left || rect.bottom <= rect.top
+}
+
+fn format_rect(rect: Option<&Rect>) -> String {
+    match rect {
+        Some(r) => format!("({},{} {}x{})", r.l, r.t, r.r - r.l, r.b - r.t),
+        None => String::from("<none>"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_classes_are_ignored_case_insensitively() {
+        assert!(is_ignored_fullscreen_class("Progman"));
+        assert!(is_ignored_fullscreen_class("workerw"));
+        assert!(is_ignored_fullscreen_class("SHELL_TRAYWND"));
+        assert!(!is_ignored_fullscreen_class("Chrome_WidgetWin_1"));
+        assert!(!is_ignored_fullscreen_class(""));
+    }
+
+    #[test]
+    fn a_null_window_has_no_process() {
+        assert_eq!(window_process_id(HWND::default()), None);
+    }
 
     #[test]
     fn run_value_path_is_quoted() {
