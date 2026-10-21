@@ -19,7 +19,8 @@ path = "src/main.rs"
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-single-instance = "2"
 # rustls with the OS verifier keeps corporate roots trusted; gzip is a default.
-ureq = { version = "3", features = ["platform-verifier"] }
+# socks-proxy serves SOCKS environment proxies such as ALL_PROXY=socks5h://.
+ureq = { version = "3", features = ["platform-verifier", "socks-proxy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"

@@ -30,7 +30,7 @@ only two Win32 couplings: `src/net/winhttp.rs`, and the `CommandExt` import in
   - User-Agent `claude-code-usage-bubble/<version>`.
   - A per-request User-Agent replaces the agent's, as the Codex provider requires.
 - Proxy:
-  - Env proxies: `net::env_proxy()` walks the variables ureq reads (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, either case) and keeps the first HTTP/HTTPS one, skipping SOCKS entries with a warning because the `socks-proxy` feature is off. `NO_PROXY` applies to the chosen proxy.
+  - Env proxies: `net::env_proxy()` walks the variables ureq reads (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, either case) and keeps the first valid one, in ureq's order. ureq's `socks-proxy` feature is on, so a SOCKS entry such as Clash's `ALL_PROXY=socks5h://…` is used, not skipped. `NO_PROXY` applies to the chosen proxy.
   - `cfg(windows)`, only when no env proxy is set: `platform::windows::system_proxy()` reads `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings` (`ProxyEnable`, `ProxyServer`, `ProxyOverride`). Nothing when `ProxyEnable` is not 1.
   - Parsing, a pure function in `core` with tests: a `ProxyServer` of the form `http=h:p;https=h:p;…` uses the `https=` entry, else the `http=` entry; a bare `h:p` applies to all schemes. `ProxyOverride` is split on `;`; each entry is a case-insensitive glob (`*` wildcard) against the host, and `<local>` matches dotless hosts.
   - `net::Client` holds a proxied agent and a direct agent and picks per request: direct when the request host matches a `ProxyOverride` entry. The parsed proxy URL is also handed to the updater builder in Phase 09.
@@ -83,10 +83,10 @@ only two Win32 couplings: `src/net/winhttp.rs`, and the `CommandExt` import in
 - `net::Error::Status` is kept so the providers compile unchanged; the client
   never builds it, because every status comes back as a `Response`.
 - `net::Client::new` consults `net::system_proxy()` only when
-  `net::env_proxy()` finds no usable proxy. A SOCKS env entry is skipped
-  rather than passed to ureq, which without `socks-proxy` fails every request
-  for `socks5h` and silently connects directly for `socks5`; skipping lets an
-  HTTP env proxy or the system proxy take over. `Client::system_proxy()`
+  `net::env_proxy()` finds no usable proxy. SOCKS env proxies go through
+  ureq's `socks-proxy` connector; without that feature ureq fails every
+  request for `socks5h` and silently connects directly for `socks5`. The
+  system proxy stays HTTP/HTTPS only. `Client::system_proxy()`
   exposes the system proxy in use for the updater
   builder in Phase 09. Proxy URLs are never logged (they may hold
   credentials).

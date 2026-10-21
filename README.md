@@ -187,7 +187,8 @@ same; these differences are visible:
   no longer use a warning or info icon.
 - Proxy auto-configuration (PAC scripts and WPAD) is no longer used. A
   static system proxy, its bypass list and the `HTTPS_PROXY`-style
-  environment variables still are.
+  environment variables still are, including a SOCKS `ALL_PROXY` such as
+  `socks5h://127.0.0.1:7890`.
 - Only one copy runs per signed-in user session, instead of one per machine.
 
 ## Diagnostics

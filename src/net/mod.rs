@@ -58,14 +58,12 @@ const ENV_PROXY_VARS: &[&str] = &[
     "http_proxy",
 ];
 
-/// The environment proxy, if one is usable.
+/// The environment proxy, if one is set.
 ///
-/// Walks the variables `ureq` reads, but skips SOCKS entries: this build has no
-/// `socks-proxy` support, so `ureq` would either fail every request (`socks5h`)
-/// or silently connect directly (`socks5`). Proxy tools often set
-/// `ALL_PROXY=socks5h://…` next to `HTTPS_PROXY=http://…`, so skipping lets the
-/// HTTP entry, or failing that the system proxy, take over. `NO_PROXY` applies
-/// to the chosen proxy.
+/// Walks the variables `ureq` reads and keeps the first valid one, whatever its
+/// scheme: HTTP and HTTPS proxies are reached with CONNECT, SOCKS4/4a/5/5h
+/// proxies (`ALL_PROXY=socks5h://…`, as Clash and v2ray set) through ureq's
+/// `socks-proxy` support. `NO_PROXY` applies to the chosen proxy.
 pub fn env_proxy() -> Option<Proxy> {
     env_proxy_from(|name| std::env::var(name).ok())
 }
@@ -79,10 +77,6 @@ fn env_proxy_from(var: impl Fn(&str) -> Option<String>) -> Option<Proxy> {
         let Ok(parsed) = Proxy::new(&value) else {
             continue;
         };
-        if !is_connect_proxy(&parsed) {
-            log::warn!("{name} ignored, only http and https proxies are supported");
-            continue;
-        }
         // Rebuild so the proxy carries the `NO_PROXY` bypass list, which only
         // the builder accepts.
         let mut builder = Proxy::builder(parsed.protocol())
@@ -108,7 +102,8 @@ fn env_proxy_from(var: impl Fn(&str) -> Option<String>) -> Option<Proxy> {
     None
 }
 
-/// Whether `proxy` is an HTTP CONNECT proxy, the only kind this build supports.
+/// Whether `proxy` is an HTTP CONNECT proxy, the only kind the system proxy
+/// may be.
 fn is_connect_proxy(proxy: &Proxy) -> bool {
     matches!(proxy.protocol(), ProxyProtocol::Http | ProxyProtocol::Https)
 }
@@ -160,9 +155,8 @@ impl Client {
         let direct = make_agent(user_agent, env_proxy);
         let proxied = match system {
             Some(proxy) => match Proxy::new(&proxy.url) {
-                // Without ureq's `socks-proxy` feature a manually configured
-                // SOCKS proxy panics at connect time, so only CONNECT proxies
-                // are accepted here.
+                // The system proxy keeps the old WinHTTP client's scope:
+                // CONNECT proxies only, as `core::proxy` already parses it.
                 Ok(p) if !is_connect_proxy(&p) => {
                     log::warn!("system proxy ignored, only http and https proxies are supported");
                     None
@@ -502,31 +496,120 @@ mod tests {
         move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
     }
 
-    #[test]
-    fn socks_env_proxy_is_skipped_for_the_http_one() {
-        let proxy = serve_once("200 OK", &[], Vec::new());
-        let origin = serve_once("200 OK", &[], Vec::new());
-        let chosen = env_proxy_from(env(&[
-            ("all_proxy", "socks5h://127.0.0.1:9"),
-            ("https_proxy", &proxy.base),
-        ]))
-        .expect("http env proxy");
-        assert_eq!(chosen.protocol(), ProxyProtocol::Http);
-
-        let client = Client::build(USER_AGENT, Some(chosen), None).expect("client");
-        // The fake proxy does not tunnel; the CONNECT reaching it is the proof.
-        let _ = client.get(&format!("{}/x", origin.base)).send();
-        let request = received(&proxy);
-        let authority = origin.base.trim_start_matches("http://");
-        assert!(
-            request.starts_with(&format!("CONNECT {authority} HTTP/1.1")),
-            "{request}"
-        );
+    /// A one-shot SOCKS5 proxy that accepts the handshake, reports the CONNECT
+    /// target it was asked for, then answers the tunnelled request itself with
+    /// `200 OK` and `body`.
+    fn serve_socks5_once(body: &'static [u8]) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // A broken handshake must fail the test, not hang it.
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let byte = |stream: &mut std::net::TcpStream, n: usize| {
+                let mut buf = vec![0u8; n];
+                stream.read_exact(&mut buf).map(|_| buf)
+            };
+            // Greeting: version 5, then the offered auth methods.
+            let Ok(head) = byte(&mut stream, 2) else {
+                return;
+            };
+            let _ = byte(&mut stream, usize::from(head[1]));
+            if stream.write_all(&[5, 0]).is_err() {
+                return;
+            }
+            // Request: version, CONNECT, reserved, address type.
+            let Ok(req) = byte(&mut stream, 4) else {
+                return;
+            };
+            let target = match req[3] {
+                3 => {
+                    let len = byte(&mut stream, 1).map(|b| usize::from(b[0])).unwrap_or(0);
+                    String::from_utf8_lossy(&byte(&mut stream, len).unwrap_or_default())
+                        .into_owned()
+                }
+                1 => byte(&mut stream, 4)
+                    .map(|a| std::net::Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string())
+                    .unwrap_or_default(),
+                other => format!("address type {other}"),
+            };
+            let port = byte(&mut stream, 2)
+                .map(|p| u16::from_be_bytes([p[0], p[1]]))
+                .unwrap_or(0);
+            let _ = stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+            // Read the tunnelled request head, then answer it.
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+            let _ = stream.write_all(body);
+            let _ = tx.send(format!(
+                "{} {target}:{port}\n{}",
+                req[0],
+                String::from_utf8_lossy(&seen)
+            ));
+        });
+        (port, rx)
     }
 
     #[test]
-    fn socks_only_env_proxy_yields_none() {
-        assert!(env_proxy_from(env(&[("ALL_PROXY", "socks5://127.0.0.1:1080")])).is_none());
+    fn socks5h_env_proxy_tunnels_with_remote_resolution() {
+        let (socks_port, seen) = serve_socks5_once(b"via socks");
+        let http_proxy = serve_once("200 OK", &[], Vec::new());
+        // Clash and v2ray set both; ureq's order puts ALL_PROXY first.
+        let chosen = env_proxy_from(env(&[
+            ("all_proxy", &format!("socks5h://127.0.0.1:{socks_port}")),
+            ("https_proxy", &http_proxy.base),
+        ]))
+        .expect("socks env proxy");
+        assert_eq!(chosen.protocol(), ProxyProtocol::Socks5h);
+
+        let client = Client::build(USER_AGENT, Some(chosen), None).expect("client");
+        // `socks5h` hands the host name to the proxy instead of resolving it,
+        // so the name need not resolve to the fake proxy's own address.
+        let resp = client
+            .get("http://example.invalid:8080/x")
+            .send()
+            .expect("send through socks");
+        assert_eq!(resp.body(), b"via socks");
+        let request = seen
+            .recv_timeout(Duration::from_secs(10))
+            .expect("socks proxy saw the request");
+        assert!(
+            request.starts_with("5 example.invalid:8080\nGET /x HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(http_proxy
+            .request
+            .recv_timeout(Duration::from_millis(200))
+            .is_err());
+    }
+
+    #[test]
+    fn env_proxy_follows_ureq_order_and_skips_invalid_values() {
+        let socks = env_proxy_from(env(&[("ALL_PROXY", "socks5://127.0.0.1:1080")]))
+            .expect("socks env proxy");
+        assert_eq!(socks.protocol(), ProxyProtocol::Socks5);
+        let http = env_proxy_from(env(&[
+            ("ALL_PROXY", "bad host:x"),
+            ("http_proxy", "http://proxy.corp:3128"),
+        ]))
+        .expect("http env proxy");
+        assert_eq!(http.protocol(), ProxyProtocol::Http);
+        assert_eq!(http.host(), "proxy.corp");
         assert!(env_proxy_from(env(&[("HTTPS_PROXY", "bad host:x")])).is_none());
         assert!(env_proxy_from(env(&[])).is_none());
     }
