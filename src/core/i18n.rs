@@ -5,10 +5,14 @@
 
 use std::time::{Duration, SystemTime};
 
+use serde::Serialize;
+
 use crate::usage::{ProviderId, Window};
 
-/// The strings every UI module needs.
-#[derive(Clone, Debug)]
+/// The strings every UI module needs. Serialised camelCase for the
+/// webviews.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocaleStrings {
     pub window_title: String,
     pub refresh: String,
