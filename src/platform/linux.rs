@@ -106,6 +106,54 @@ pub fn button1_down() -> bool {
     }
 }
 
+/// How long the portal settings read may block.
+const PORTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Maps the portal's `org.freedesktop.appearance color-scheme` value to a
+/// dark flag: 1 prefers dark, 2 prefers light. "No preference" (0), any
+/// other value and an unreachable portal give `None`, so the caller keeps
+/// its current theme. tao's `Window::theme()` maps all of those to light.
+pub fn color_scheme_is_dark(scheme: Option<u32>) -> Option<bool> {
+    match scheme {
+        Some(1) => Some(true),
+        Some(2) => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether the desktop portal states a dark or light preference; `None`
+/// when it states none or cannot be reached. Blocks for up to
+/// `PORTAL_TIMEOUT`.
+pub fn portal_prefers_dark() -> Option<bool> {
+    color_scheme_is_dark(read_color_scheme())
+}
+
+fn read_color_scheme() -> Option<u32> {
+    use dbus::arg::Variant;
+    use dbus::blocking::Connection;
+
+    let result = Connection::new_session().and_then(|conn| {
+        let proxy = conn.with_proxy(
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            PORTAL_TIMEOUT,
+        );
+        let (value,): (Variant<Variant<u32>>,) = proxy.method_call(
+            "org.freedesktop.portal.Settings",
+            "Read",
+            ("org.freedesktop.appearance", "color-scheme"),
+        )?;
+        Ok(value.0 .0)
+    });
+    match result {
+        Ok(scheme) => Some(scheme),
+        Err(err) => {
+            log::debug!("portal color-scheme unavailable: {err}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +175,16 @@ mod tests {
         assert!(!positioning_supported(os("wayland-0"), os("wayland")));
         assert!(!positioning_supported(os("wayland-0"), os("wayland,x11")));
         assert!(!positioning_supported(None, os("broadway")));
+    }
+
+    #[test]
+    fn only_a_stated_portal_preference_sets_the_theme() {
+        assert_eq!(color_scheme_is_dark(Some(1)), Some(true));
+        assert_eq!(color_scheme_is_dark(Some(2)), Some(false));
+        // No preference, unknown values and an unreachable portal keep the
+        // current theme (dark by default).
+        assert_eq!(color_scheme_is_dark(Some(0)), None);
+        assert_eq!(color_scheme_is_dark(Some(7)), None);
+        assert_eq!(color_scheme_is_dark(None), None);
     }
 }

@@ -34,7 +34,7 @@ corners for the hit area (D4).
   - `taskbar_rect()` uses `SHAppBarMessage(ABM_GETTASKBARPOS)`.
 - **Linux and macOS** (D3):
   - Move end is a 250 ms debounce on `Moved`, armed only by `bubble_drag_start`. On X11, when the debounce fires, `platform::linux::button1_down()` (x11rb `QueryPointer`) re-arms it while Button1 is still held.
-  - Theme comes from `window.theme()`, defaulting to dark, and is rechecked on `ThemeChanged`.
+  - Theme defaults to dark and is rechecked on bubble creation and `ThemeChanged`. macOS uses `window.theme()`. Linux reads the portal `org.freedesktop.appearance color-scheme` itself (1 dark, 2 light) and keeps the current theme on "no preference" or an unreachable portal, because tao maps both to light.
   - There is no taskbar rect. On Wayland without Xwayland, skip snap, clamp and saving positions.
 - **Move end** (Rust): disarm, run `core::geom::snap` with the peers' `outer_position`/`outer_size` in `LIVE_USAGE` order, apply `set_position(Physical)` only if the position changed, then persist `bubble_positions[slug]`.
 - **Commands:**
@@ -105,13 +105,13 @@ corners for the hit area (D4).
 - [x] `ui/bubble.html`, `ui/bubble.css` (palette per `[data-theme]`, dead corners), `ui/bubble.js` (layout, texts from the payload only, pulse, 60 s time progress, `visibilitychange`, pointer drag/click, `contextmenu`, Ctrl+wheel), `ui/tauri-bridge.js`
 - [x] `src/bubble.rs` rewritten: builder options as listed, exact physical size and saved/default position clamped into the work area, refit on `ScaleFactorChanged`, `destroy()` only with recreate after `Destroyed`, show on `bubble_ready` or the 1.5 s fallback, `widget_visible` honoured at creation
 - [x] `src/platform/windows.rs`: `apply_no_activate`, `show_no_activate`, `hide`, `install_bubble_hook` (`WM_EXITSIZEMOVE`, `WM_SETTINGCHANGE`, `WM_DISPLAYCHANGE`, plus `MA_NOACTIVATE`), `taskbar`
-- [x] Linux/macOS move end: 250 ms debounce armed by `bubble_drag_start`, re-armed while X11 Button1 is held (`platform::linux::button1_down`); theme from `window.theme()` and `ThemeChanged`; native Wayland skips snap, clamp and saving
+- [x] Linux/macOS move end: 250 ms debounce armed by `bubble_drag_start`, re-armed while X11 Button1 is held (`platform::linux::button1_down`); theme from `window.theme()` (macOS) or the portal color-scheme (Linux, only a stated preference applies) on creation and `ThemeChanged`; native Wayland skips snap, clamp and saving
 - [x] Move end snaps with peers in `LIVE_USAGE` order, moves only on a change, saves the position
 - [x] Commands `bubble_click` (logs until the panel exists), `bubble_drag_start`, `bubble_resize_step`, `bubble_ready`; resize around each centre without snap or save
 - [x] Reset position moves the existing bubbles to their defaults
 - [x] `src/core/visibility.rs` with tests for every row of the transition table; user show/hide goes through it
 - [x] Deleted `src/os/mod.rs` and `src/os/string.rs` (`src/os/theme.rs` was already gone)
-- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (181 passed, 1 ignored), `npm run lint`, `npm test` (32 passed), `npm run tauri build -- --no-bundle`; CI green on `windows-latest`, `ubuntu-22.04` and `macos-latest`
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (183 passed, 1 ignored), `npm run lint`, `npm test` (32 passed), `npm run tauri build -- --no-bundle`; CI green on `windows-latest`, `ubuntu-22.04` and `macos-latest`
 - [x] Headless Chromium render of the page with a stubbed `__TAURI__` at 100%, 150% and 200% (layout, both themes, dead corners) and synthetic pointer checks (click, drag past 3 px, no drag on a later hover, Ctrl+wheel, right-click on the pill only)
 - [ ] Visual comparison against a v0.5.0 screenshot at 100% and 150% (none in the repo; Windows manual check)
 - [ ] Linux desktop (X11) and Windows manual checks below

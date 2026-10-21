@@ -348,7 +348,11 @@ pub fn create(app: &AppHandle, provider: ProviderId) -> tauri::Result<()> {
     );
 
     prepare_native(app, &window, provider);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    if let Some(is_dark) = platform::linux::portal_prefers_dark() {
+        runtime.set_dark(is_dark);
+    }
+    #[cfg(target_os = "macos")]
     match window.theme() {
         Ok(theme) => runtime.set_dark(theme != tauri::Theme::Light),
         Err(err) => log::debug!("theme of {label} unavailable: {err}"),
@@ -513,11 +517,25 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         WindowEvent::Moved(_) => drag::moved(label),
         // Windows reads the theme from the registry on WM_SETTINGCHANGE;
         // tao's theme follows the apps setting, not the system one.
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
         WindowEvent::ThemeChanged(theme) => {
             let is_dark = *theme != tauri::Theme::Light;
             let app = window.app_handle().clone();
             defer("bubble-theme", move || {
+                if let Some(runtime) = runtime_of(&app) {
+                    runtime.set_dark(is_dark);
+                }
+            });
+        }
+        // tao reports "no preference" and an unreachable portal as light, so
+        // the portal is read again and only a stated preference applies.
+        #[cfg(target_os = "linux")]
+        WindowEvent::ThemeChanged(_) => {
+            let app = window.app_handle().clone();
+            defer("bubble-theme", move || {
+                let Some(is_dark) = platform::linux::portal_prefers_dark() else {
+                    return;
+                };
                 if let Some(runtime) = runtime_of(&app) {
                     runtime.set_dark(is_dark);
                 }
