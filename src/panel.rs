@@ -1,542 +1,464 @@
-// Expanded panel shown when a bubble is left-clicked.
-//
-// Plain opaque top-most popup with two horizontal usage bars (session/5h and
-// weekly/7d) plus countdown text. Closes on focus loss.
+//! The details panel: one opaque, undecorated, always-on-top webview
+//! labelled `panel`, created hidden at startup and then only shown and
+//! hidden, never destroyed.
+//!
+//! A bubble click toggles it for that bubble's provider, placed below the
+//! bubble (or above it near the bottom edge). Losing focus hides it. While
+//! it is open, every state push refreshes it in place.
+//!
+//! The page (`ui/panel.js`) only draws the [`PanelPayload`]. Every Tauri
+//! call here runs on the main thread, which also serialises a toggle
+//! against a refresh, and no function holds a lock across a Tauri call.
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+use tauri::window::Color;
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, Window, WindowEvent,
 };
-use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::i18n::LocaleStrings;
-use crate::os::dpi::scale as scale_to_dpi;
-use crate::os::{to_utf16_nul as wide_str, Rgb as Color};
+use crate::core::geom::{self, Point, Rect};
+use crate::core::payload::PanelPayload;
+use crate::platform;
+use crate::runtime::{self, Runtime};
 use crate::usage::ProviderId;
 
-const CLASS_NAME: &str = "ClaudeCodeUsageBubblePanel";
+/// Window label of the panel.
+pub const PANEL_LABEL: &str = "panel";
+
+/// Event carrying a [`PanelPayload`] to the panel webview.
+pub const PANEL_UPDATE_EVENT: &str = "panel:update";
+
+const TITLE: &str = "Usage panel";
 const PANEL_W_LOGICAL: i32 = 280;
 const PANEL_H_LOGICAL: i32 = 120;
-const PADDING_LOGICAL: i32 = 14;
-const ROW_GAP_LOGICAL: i32 = 8;
-const LABEL_W_LOGICAL: i32 = 28;
-const RIGHT_TEXT_W_LOGICAL: i32 = 96;
-const BAR_HEIGHT_LOGICAL: i32 = 14;
 
-pub struct PanelData {
-    pub model: ProviderId,
-    pub session_pct: f64,
-    pub session_text: String,
-    pub weekly_pct: f64,
-    pub weekly_text: String,
-    pub is_dark: bool,
-    pub strings: LocaleStrings,
-}
+/// A click that reopens the panel this soon after focus loss hid it, for
+/// the same provider, is the click that caused the focus loss: it closes
+/// the panel instead of reopening it.
+const BLUR_REOPEN_GUARD: Duration = Duration::from_millis(150);
 
+/// Panel backgrounds, matching `ui/panel.css`, so a show never flashes white.
+const DARK_BG: Color = Color(0x1F, 0x1F, 0x1F, 0xFF);
+const LIGHT_BG: Color = Color(0xFA, 0xFA, 0xFA, 0xFF);
+
+/// What the panel shows. Only the main thread changes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PanelState {
-    hwnd: HWND,
-    data: PanelData,
+    /// The provider on screen, `None` while the panel is hidden.
+    shown: Option<ProviderId>,
+    /// The provider last shown, so a reloaded page can ask for its data.
+    provider: Option<ProviderId>,
+    /// The provider and time of the last hide caused by focus loss.
+    blur_hide: Option<(ProviderId, Instant)>,
 }
 
-// HWND wraps `*mut c_void` which is `!Send`, but the panel state is only ever
-// accessed from the UI thread — the Mutex exists to satisfy the `OnceLock`
-// static contract, not because of real cross-thread sharing.
-unsafe impl Send for PanelState {}
+static STATE: Mutex<PanelState> = Mutex::new(PanelState {
+    shown: None,
+    provider: None,
+    blur_hide: None,
+});
 
-fn state() -> &'static Mutex<Option<PanelState>> {
-    static S: OnceLock<Mutex<Option<PanelState>>> = OnceLock::new();
-    S.get_or_init(|| Mutex::new(None))
+fn with_state<T>(f: impl FnOnce(&mut PanelState) -> T) -> T {
+    let mut guard = STATE.lock().unwrap_or_else(PoisonError::into_inner);
+    f(&mut guard)
 }
 
-fn lock_state() -> MutexGuard<'static, Option<PanelState>> {
-    state().lock().expect("panel state mutex poisoned")
+/// What a bubble click does to the panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Toggle {
+    Show,
+    Hide,
+    /// The click already closed the panel through focus loss.
+    Ignore,
 }
 
-pub fn register_class() {
-    static REGISTERED: OnceLock<()> = OnceLock::new();
-    REGISTERED.get_or_init(|| unsafe {
-        let class_w = wide_str(CLASS_NAME);
-        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-        let wc = WNDCLASSEXW {
-            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            style: CS_HREDRAW | CS_VREDRAW,
-            lpfnWndProc: Some(wnd_proc),
-            hInstance: HINSTANCE(hinstance.0),
-            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
-            hbrBackground: HBRUSH(std::ptr::null_mut()),
-            lpszClassName: PCWSTR::from_raw(class_w.as_ptr()),
-            ..Default::default()
-        };
-        if RegisterClassExW(&wc) == 0 {
-            log::error!("panel RegisterClassExW returned 0");
+/// Decide a click on `provider`'s bubble and record the result in `state`.
+fn toggle_state(state: &mut PanelState, provider: ProviderId, now: Instant) -> Toggle {
+    if state.shown == Some(provider) {
+        state.shown = None;
+        return Toggle::Hide;
+    }
+    let just_blurred = state.shown.is_none()
+        && state.blur_hide.is_some_and(|(p, at)| {
+            p == provider && now.saturating_duration_since(at) < BLUR_REOPEN_GUARD
+        });
+    // Either way the guard is spent, so a later click opens the panel.
+    state.blur_hide = None;
+    if just_blurred {
+        return Toggle::Ignore;
+    }
+    state.shown = Some(provider);
+    state.provider = Some(provider);
+    Toggle::Show
+}
+
+/// Record a hide caused by focus loss. Returns whether the panel was shown.
+fn blur_state(state: &mut PanelState, now: Instant) -> bool {
+    match state.shown.take() {
+        Some(provider) => {
+            state.blur_hide = Some((provider, now));
+            true
+        }
+        None => false,
+    }
+}
+
+/// The provider on screen, `None` while the panel is hidden.
+pub fn shown_provider() -> Option<ProviderId> {
+    with_state(|s| s.shown)
+}
+
+/// The provider the panel last showed, hidden or not.
+pub fn current_provider() -> Option<ProviderId> {
+    with_state(|s| s.provider)
+}
+
+fn runtime_of(app: &AppHandle) -> Option<Arc<Runtime>> {
+    app.try_state::<Arc<Runtime>>().map(|r| Arc::clone(&r))
+}
+
+fn background(is_dark: bool) -> Color {
+    if is_dark {
+        DARK_BG
+    } else {
+        LIGHT_BG
+    }
+}
+
+/// Create the hidden panel window. Called once at startup.
+pub fn create(app: &AppHandle, is_dark: bool) -> tauri::Result<()> {
+    let window = WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("panel.html".into()))
+        .title(TITLE)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .transparent(false)
+        .shadow(false)
+        .visible(false)
+        .background_color(background(is_dark))
+        .inner_size(f64::from(PANEL_W_LOGICAL), f64::from(PANEL_H_LOGICAL))
+        .build()?;
+    prepare_native(app, &window);
+    log::info!("{PANEL_LABEL} created");
+    Ok(())
+}
+
+/// Windows: drop the panel from Alt-Tab and turn off the browser keys of
+/// its webview, on the window's own (main) thread, before the first show.
+#[cfg(windows)]
+fn prepare_native(app: &AppHandle, window: &WebviewWindow) {
+    let window = window.clone();
+    let queued = app.run_on_main_thread(move || {
+        if let Err(err) = platform::windows::apply_toolwindow(&window) {
+            log::warn!("{PANEL_LABEL} may show in Alt-Tab: {err}");
+        }
+        if let Err(err) = platform::windows::disable_browser_accelerator_keys(&window) {
+            log::warn!("{PANEL_LABEL} keeps the browser accelerator keys: {err}");
         }
     });
-}
-
-pub fn is_visible() -> bool {
-    let s = lock_state();
-    s.as_ref()
-        .map(|p| unsafe { IsWindowVisible(p.hwnd).as_bool() })
-        .unwrap_or(false)
-}
-
-pub fn current_model() -> Option<ProviderId> {
-    lock_state().as_ref().map(|p| p.data.model)
-}
-
-/// Show the panel for the given model, anchored near the supplied bubble HWND.
-/// If a panel is already visible, hide it instead (toggle).
-pub fn toggle(data: PanelData, anchor_hwnd: HWND) {
-    if is_visible() && current_model() == Some(data.model) {
-        hide();
-        return;
-    }
-    show(data, anchor_hwnd);
-}
-
-pub fn show(data: PanelData, anchor_hwnd: HWND) {
-    register_class();
-
-    let mut anchor_rect = RECT::default();
-    unsafe {
-        let _ = GetWindowRect(anchor_hwnd, &mut anchor_rect);
-    }
-    let dpi = unsafe { GetDpiForWindow(anchor_hwnd).max(96) };
-    let panel_w = scale_to_dpi(PANEL_W_LOGICAL, dpi);
-    let panel_h = scale_to_dpi(PANEL_H_LOGICAL, dpi);
-    let (x, y) = place_near(anchor_rect, panel_w, panel_h);
-
-    let existing_hwnd = lock_state().as_ref().map(|p| p.hwnd);
-    let hwnd = match existing_hwnd {
-        Some(h) => h,
-        None => match create_panel_window(x, y, panel_w, panel_h) {
-            Some(h) => h,
-            None => return,
-        },
-    };
-
-    apply_win11_window_chrome(hwnd);
-
-    {
-        let mut guard = lock_state();
-        if let Some(p) = guard.as_mut() {
-            p.data = data;
-        } else {
-            *guard = Some(PanelState { hwnd, data });
-        }
-    }
-
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            HWND::default(),
-            x,
-            y,
-            panel_w,
-            panel_h,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-        let _ = InvalidateRect(hwnd, None, true);
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        let _ = SetForegroundWindow(hwnd);
+    if let Err(err) = queued {
+        log::warn!("panel set-up could not reach the main thread: {err}");
     }
 }
 
-fn create_panel_window(x: i32, y: i32, w: i32, h: i32) -> Option<HWND> {
-    let hwnd = unsafe {
-        let class_w = wide_str(CLASS_NAME);
-        let title_w = wide_str("Usage panel");
-        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-        CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            PCWSTR::from_raw(class_w.as_ptr()),
-            PCWSTR::from_raw(title_w.as_ptr()),
-            WS_POPUP,
-            x,
-            y,
-            w,
-            h,
-            HWND::default(),
-            HMENU::default(),
-            hinstance,
-            None,
-        )
-        .unwrap_or_default()
-    };
-    if hwnd == HWND::default() {
-        log::error!("panel CreateWindowExW failed");
-        None
-    } else {
-        Some(hwnd)
+#[cfg(not(windows))]
+fn prepare_native(_app: &AppHandle, _window: &WebviewWindow) {}
+
+/// A click on `provider`'s bubble: hide the panel when it shows that
+/// provider, otherwise move it next to the bubble and show that provider.
+pub fn toggle(app: &AppHandle, provider: ProviderId) {
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || toggle_on_main(&handle, provider));
+    if let Err(err) = queued {
+        log::warn!("panel toggle could not reach the main thread: {err}");
     }
 }
 
-/// Apply Windows 11 rounded corners. Win11-only — `DwmSetWindowAttribute`
-/// returns an error on Win10 and earlier, which we deliberately swallow so
-/// the panel falls back to square corners without complaint. Idempotent:
-/// DWM ignores redundant identical-value sets, so calling this on every
-/// `show()` is safe.
-fn apply_win11_window_chrome(hwnd: HWND) {
-    unsafe {
-        let pref = DWMWCP_ROUND;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            &pref as *const _ as *const _,
-            std::mem::size_of_val(&pref) as u32,
-        );
-    }
-}
-
-pub fn hide() {
-    let hwnd_opt = lock_state().as_ref().map(|p| p.hwnd);
-    if let Some(hwnd) = hwnd_opt {
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
-    }
-}
-
-pub fn destroy() {
-    let hwnd_opt = lock_state().as_ref().map(|p| p.hwnd);
-    if let Some(hwnd) = hwnd_opt {
-        unsafe {
-            let _ = DestroyWindow(hwnd);
-        }
-    }
-    *lock_state() = None;
-}
-
-/// Refresh the panel's data (called from app when poll cycle completes).
-pub fn refresh_data(data: PanelData) {
-    let hwnd_opt = {
-        let mut guard = lock_state();
-        let Some(p) = guard.as_mut() else {
-            return;
-        };
-        if p.data.model != data.model {
-            // Showing a different model right now — caller can decide whether to swap.
-            return;
-        }
-        p.data = data;
-        Some(p.hwnd)
-    };
-    if let Some(hwnd) = hwnd_opt {
-        unsafe {
-            let _ = InvalidateRect(hwnd, None, false);
-        }
-    }
-}
-
-// ---------- Window proc & painting ----------
-
-unsafe extern "system" fn wnd_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            paint(hwnd, hdc);
-            let _ = EndPaint(hwnd, &ps);
-            LRESULT(0)
-        }
-        WM_ERASEBKGND => LRESULT(1),
-        WM_KILLFOCUS => {
-            // Close the panel when it loses focus. Use ShowWindow rather than
-            // DestroyWindow so we can re-show it next click without re-creating.
-            let _ = ShowWindow(hwnd, SW_HIDE);
-            LRESULT(0)
-        }
-        WM_DESTROY => {
-            *lock_state() = None;
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-fn paint(hwnd: HWND, hdc: HDC) {
-    let Some(data) = clone_data() else {
+fn toggle_on_main(app: &AppHandle, provider: ProviderId) {
+    let Some(window) = app.get_webview_window(PANEL_LABEL) else {
+        log::warn!("bubble click on {} but no panel exists", provider.slug());
         return;
     };
-    let mut rc = RECT::default();
-    unsafe {
-        let _ = GetClientRect(hwnd, &mut rc);
-    }
-    let dpi = unsafe { GetDpiForWindow(hwnd).max(96) };
-    let scaled = |v: i32| scale_to_dpi(v, dpi);
-
-    let bg = if data.is_dark {
-        Color::from_hex("#1F1F1F")
-    } else {
-        Color::from_hex("#FAFAFA")
-    };
-    let text_color = if data.is_dark {
-        Color::from_hex("#EAEAEA")
-    } else {
-        Color::from_hex("#1F1F1F")
-    };
-    let track = if data.is_dark {
-        Color::from_hex("#3A3A3A")
-    } else {
-        Color::from_hex("#D6D6D6")
-    };
-    let session_accent =
-        crate::usage_color::bar_fill_color(data.model, data.is_dark, data.session_pct);
-    let weekly_accent =
-        crate::usage_color::bar_fill_color(data.model, data.is_dark, data.weekly_pct);
-
-    unsafe {
-        let bg_brush = CreateSolidBrush(COLORREF(bg.into_colorref()));
-        FillRect(hdc, &rc, bg_brush);
-        let _ = DeleteObject(bg_brush);
-
-        let stripe_color = crate::usage_color::accent_color_for(data.model, data.is_dark);
-        let stripe_w = scaled(4);
-        let stripe_rect = RECT {
-            left: 0,
-            top: 0,
-            right: stripe_w,
-            bottom: rc.bottom,
-        };
-        let stripe_brush = CreateSolidBrush(COLORREF(stripe_color.into_colorref()));
-        FillRect(hdc, &stripe_rect, stripe_brush);
-        let _ = DeleteObject(stripe_brush);
-
-        // Header row: model label
-        let header = match data.model {
-            ProviderId::Claude => data.strings.claude_label.clone(),
-            ProviderId::ChatGpt => data.strings.chatgpt_label.clone(),
-            ProviderId::OpenCodeGo => data.strings.opencode_go_label.clone(),
-        };
-        draw_text(
-            hdc,
-            &header,
-            text_color,
-            scaled(PADDING_LOGICAL),
-            scaled(PADDING_LOGICAL),
-            rc.right - 2 * scaled(PADDING_LOGICAL),
-            scaled(18),
-            true,
-            dpi,
-        );
-
-        let bar_x = scaled(PADDING_LOGICAL) + scaled(LABEL_W_LOGICAL) + scaled(4);
-        let bar_w =
-            rc.right - bar_x - scaled(PADDING_LOGICAL) - scaled(RIGHT_TEXT_W_LOGICAL) - scaled(4);
-        let row1_y = scaled(PADDING_LOGICAL) + scaled(24);
-        let row2_y = row1_y + scaled(BAR_HEIGHT_LOGICAL) + scaled(ROW_GAP_LOGICAL) + scaled(8);
-
-        draw_row(
-            hdc,
-            &data.strings.session_window,
-            scaled(PADDING_LOGICAL),
-            row1_y,
-            bar_x,
-            bar_w,
-            scaled(BAR_HEIGHT_LOGICAL),
-            data.session_pct,
-            &data.session_text,
-            text_color,
-            track,
-            session_accent,
-            dpi,
-        );
-
-        draw_row(
-            hdc,
-            &data.strings.weekly_window,
-            scaled(PADDING_LOGICAL),
-            row2_y,
-            bar_x,
-            bar_w,
-            scaled(BAR_HEIGHT_LOGICAL),
-            data.weekly_pct,
-            &data.weekly_text,
-            text_color,
-            track,
-            weekly_accent,
-            dpi,
-        );
+    match with_state(|s| toggle_state(s, provider, Instant::now())) {
+        Toggle::Hide => hide(&window),
+        Toggle::Ignore => log::debug!("panel just closed by this click; not reopened"),
+        Toggle::Show => show_for(app, &window, provider),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_row(
-    hdc: HDC,
-    label: &str,
-    label_x: i32,
-    row_y: i32,
-    bar_x: i32,
-    bar_w: i32,
-    bar_h: i32,
-    pct: f64,
-    right_text: &str,
-    text_color: Color,
-    track: Color,
-    accent: Color,
-    dpi: u32,
-) {
-    let scaled = |v: i32| scale_to_dpi(v, dpi);
-    let label_w = scaled(LABEL_W_LOGICAL);
-    draw_text(
-        hdc,
-        label,
-        text_color,
-        label_x,
-        row_y - scaled(2),
-        label_w,
-        bar_h + scaled(4),
-        false,
-        dpi,
+/// Fill the panel with `provider`'s data, place it next to that bubble and
+/// show it with focus, so that losing focus can dismiss it.
+fn show_for(app: &AppHandle, window: &WebviewWindow, provider: ProviderId) {
+    let Some(runtime) = runtime_of(app) else {
+        log::warn!("{PANEL_LABEL} not shown: the runtime is not ready");
+        return;
+    };
+    let payload = runtime.panel_payload(provider);
+    place_near_bubble(app, window, provider);
+    if let Err(err) = window.set_background_color(Some(background(payload.is_dark))) {
+        log::debug!("{PANEL_LABEL} background not set: {err}");
+    }
+    emit(app, &payload);
+    #[cfg(windows)]
+    if let Err(err) = platform::windows::round_corners(window) {
+        // Windows 10 has no rounded corners.
+        log::debug!("{PANEL_LABEL} keeps square corners: {err}");
+    }
+    if let Err(err) = window.show() {
+        log::warn!("{PANEL_LABEL} not shown: {err}");
+    }
+    if let Err(err) = window.set_focus() {
+        log::debug!("{PANEL_LABEL} not focused: {err}");
+    }
+}
+
+/// Size the panel for the bubble's DPI and place it next to the bubble,
+/// inside the union of all monitors. Without a bubble it stays where it is.
+fn place_near_bubble(app: &AppHandle, window: &WebviewWindow, provider: ProviderId) {
+    let Some(bubble) = app.get_webview_window(&runtime::bubble_label(provider)) else {
+        log::warn!("no bubble for {}; panel not moved", provider.slug());
+        return;
+    };
+    let (Ok(pos), Ok(size), Ok(scale)) = (
+        bubble.outer_position(),
+        bubble.outer_size(),
+        bubble.scale_factor(),
+    ) else {
+        log::warn!(
+            "bounds of the {} bubble unavailable; panel not moved",
+            provider.slug()
+        );
+        return;
+    };
+    let dpi = runtime::dpi_for_scale(scale);
+    let panel_size = (
+        geom::scale(PANEL_W_LOGICAL, dpi),
+        geom::scale(PANEL_H_LOGICAL, dpi),
     );
-
-    unsafe {
-        let track_brush = CreateSolidBrush(COLORREF(track.into_colorref()));
-        let bar_rect = RECT {
-            left: bar_x,
-            top: row_y,
-            right: bar_x + bar_w,
-            bottom: row_y + bar_h,
-        };
-        FillRect(hdc, &bar_rect, track_brush);
-        let _ = DeleteObject(track_brush);
-
-        let fill_w = ((pct.clamp(0.0, 100.0) / 100.0) * bar_w as f64).round() as i32;
-        if fill_w > 0 {
-            let accent_brush = CreateSolidBrush(COLORREF(accent.into_colorref()));
-            let fill_rect = RECT {
-                left: bar_x,
-                top: row_y,
-                right: bar_x + fill_w,
-                bottom: row_y + bar_h,
-            };
-            FillRect(hdc, &fill_rect, accent_brush);
-            let _ = DeleteObject(accent_brush);
+    let physical = PhysicalSize::new(
+        panel_size.0.max(1).unsigned_abs(),
+        panel_size.1.max(1).unsigned_abs(),
+    );
+    if !platform::positioning_supported() {
+        if let Err(err) = window.set_size(physical) {
+            log::warn!("{PANEL_LABEL} not resized: {err}");
         }
+        return;
     }
-
-    let right_text_x = bar_x + bar_w + scaled(8);
-    let right_text_w = scaled(RIGHT_TEXT_W_LOGICAL);
-    draw_text(
-        hdc,
-        right_text,
-        text_color,
-        right_text_x,
-        row_y - scaled(2),
-        right_text_w,
-        bar_h + scaled(4),
-        false,
-        dpi,
+    let anchor = Rect::from_xywh(
+        pos.x,
+        pos.y,
+        i32::try_from(size.width).unwrap_or(i32::MAX),
+        i32::try_from(size.height).unwrap_or(i32::MAX),
     );
+    let bounds = virtual_screen(&runtime::monitor_rects(app)).unwrap_or(anchor);
+    let target = geom::place_near(anchor, panel_size, bounds);
+    // Move first so a DPI change from crossing monitors resizes the window
+    // before the explicit size, then place it again at the final size.
+    set_position(window, target);
+    if let Err(err) = window.set_size(physical) {
+        log::warn!("{PANEL_LABEL} not resized: {err}");
+    }
+    set_position(window, target);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_text(
-    hdc: HDC,
-    text: &str,
-    color: Color,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    bold: bool,
-    dpi: u32,
-) {
-    let mut text_w: Vec<u16> = text.encode_utf16().collect();
-    let font_size = if bold {
-        scale_to_dpi(13, dpi)
-    } else {
-        scale_to_dpi(11, dpi)
+fn set_position(window: &WebviewWindow, pos: Point) {
+    if let Err(err) = window.set_position(PhysicalPosition::new(pos.x, pos.y)) {
+        log::warn!("{PANEL_LABEL} not moved: {err}");
+    }
+}
+
+/// The bounding rect of all monitors, `None` without any.
+fn virtual_screen(monitors: &[Rect]) -> Option<Rect> {
+    monitors
+        .iter()
+        .copied()
+        .reduce(|a, b| Rect::new(a.l.min(b.l), a.t.min(b.t), a.r.max(b.r), a.b.max(b.b)))
+}
+
+fn hide(window: &WebviewWindow) {
+    if let Err(err) = window.hide() {
+        log::warn!("{PANEL_LABEL} not hidden: {err}");
+    }
+}
+
+fn emit(app: &AppHandle, payload: &PanelPayload) {
+    if let Err(err) = app.emit_to(PANEL_LABEL, PANEL_UPDATE_EVENT, payload) {
+        log::warn!("emit {PANEL_UPDATE_EVENT} failed: {err}");
+    }
+}
+
+/// Update the open panel in place, without moving it, when it shows
+/// `payload`'s provider. Called after every state push, outside the state
+/// lock; the check runs on the main thread, after any queued toggle.
+pub fn refresh_if_visible(app: &AppHandle, payload: PanelPayload) {
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        if shown_provider() == Some(payload.provider) {
+            emit(&handle, &payload);
+        }
+    });
+    if let Err(err) = queued {
+        log::warn!("panel refresh could not reach the main thread: {err}");
+    }
+}
+
+/// Handle the panel's window events; other windows are ignored.
+pub fn on_window_event(window: &Window, event: &WindowEvent) {
+    if window.label() != PANEL_LABEL {
+        return;
+    }
+    match event {
+        // Alt+F4 hides the panel; it is never destroyed.
+        WindowEvent::CloseRequested { api, .. } => {
+            api.prevent_close();
+            with_state(|s| s.shown = None);
+            if let Err(err) = window.hide() {
+                log::warn!("{PANEL_LABEL} not hidden: {err}");
+            }
+        }
+        WindowEvent::Focused(false) => on_blur(window),
+        _ => {}
+    }
+}
+
+/// Focus left the panel: hide it if it was open, and remember when, so
+/// the bubble click that took the focus does not reopen it.
+fn on_blur(window: &Window) {
+    if !with_state(|s| blur_state(s, Instant::now())) {
+        return;
+    }
+    if let Err(err) = window.hide() {
+        log::warn!("{PANEL_LABEL} not hidden: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HIDDEN: PanelState = PanelState {
+        shown: None,
+        provider: None,
+        blur_hide: None,
     };
-    let font_name = wide_str("Segoe UI");
-    unsafe {
-        let weight = if bold { FW_SEMIBOLD.0 } else { FW_NORMAL.0 } as i32;
-        let font = CreateFontW(
-            -font_size,
-            0,
-            0,
-            0,
-            weight,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET.0 as u32,
-            OUT_DEFAULT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            CLEARTYPE_QUALITY.0 as u32,
-            (FF_SWISS.0 | DEFAULT_PITCH.0) as u32,
-            PCWSTR::from_raw(font_name.as_ptr()),
-        );
-        let old_font = SelectObject(hdc, font);
-        SetTextColor(hdc, COLORREF(color.into_colorref()));
-        SetBkMode(hdc, TRANSPARENT);
-        let mut rect = RECT {
-            left: x,
-            top: y,
-            right: x + w,
-            bottom: y + h,
-        };
-        let _ = DrawTextW(
-            hdc,
-            &mut text_w,
-            &mut rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-        );
-        SelectObject(hdc, old_font);
-        let _ = DeleteObject(font);
-    }
-}
 
-fn clone_data() -> Option<PanelData> {
-    let guard = lock_state();
-    let p = guard.as_ref()?;
-    Some(PanelData {
-        model: p.data.model,
-        session_pct: p.data.session_pct,
-        session_text: p.data.session_text.clone(),
-        weekly_pct: p.data.weekly_pct,
-        weekly_text: p.data.weekly_text.clone(),
-        is_dark: p.data.is_dark,
-        strings: p.data.strings.clone(),
-    })
-}
+    #[test]
+    fn a_click_opens_the_hidden_panel() {
+        let mut state = HIDDEN;
+        let now = Instant::now();
+        assert_eq!(
+            toggle_state(&mut state, ProviderId::Claude, now),
+            Toggle::Show
+        );
+        assert_eq!(state.shown, Some(ProviderId::Claude));
+        assert_eq!(state.provider, Some(ProviderId::Claude));
+    }
 
-fn place_near(anchor: RECT, panel_w: i32, panel_h: i32) -> (i32, i32) {
-    // Anchor below the bubble by default; flip above if it would clip.
-    let mut x = anchor.left;
-    let mut y = anchor.bottom + 8;
-    // The virtual screen spans all monitors. Its origin is offset from
-    // the primary monitor when a secondary monitor sits left of / above
-    // the primary, so clamps must include SM_XVIRTUALSCREEN /
-    // SM_YVIRTUALSCREEN — not just the width/height of the union.
-    let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-    let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-    let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
-    let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-    let right = vx + vw;
-    let bottom = vy + vh;
-    if y + panel_h > bottom {
-        y = anchor.top - panel_h - 8;
+    #[test]
+    fn a_second_click_on_the_same_bubble_closes_it() {
+        let mut state = HIDDEN;
+        let now = Instant::now();
+        toggle_state(&mut state, ProviderId::Claude, now);
+        assert_eq!(
+            toggle_state(&mut state, ProviderId::Claude, now),
+            Toggle::Hide
+        );
+        assert_eq!(state.shown, None);
+        // The last provider is kept for a reloaded page.
+        assert_eq!(state.provider, Some(ProviderId::Claude));
     }
-    if y < vy {
-        y = anchor.top.max(vy);
+
+    #[test]
+    fn a_click_on_the_other_bubble_swaps_the_content() {
+        let mut state = HIDDEN;
+        let now = Instant::now();
+        toggle_state(&mut state, ProviderId::Claude, now);
+        assert_eq!(
+            toggle_state(&mut state, ProviderId::ChatGpt, now),
+            Toggle::Show
+        );
+        assert_eq!(state.shown, Some(ProviderId::ChatGpt));
     }
-    if x + panel_w > right {
-        x = right - panel_w - 8;
+
+    #[test]
+    fn a_click_right_after_a_blur_hide_does_not_reopen() {
+        let mut state = HIDDEN;
+        let t0 = Instant::now();
+        toggle_state(&mut state, ProviderId::Claude, t0);
+        assert!(blur_state(&mut state, t0));
+        assert_eq!(state.shown, None);
+        assert_eq!(
+            toggle_state(
+                &mut state,
+                ProviderId::Claude,
+                t0 + Duration::from_millis(149)
+            ),
+            Toggle::Ignore
+        );
+        assert_eq!(state.shown, None);
+        // The guard is spent: the next click opens the panel again.
+        assert_eq!(
+            toggle_state(
+                &mut state,
+                ProviderId::Claude,
+                t0 + Duration::from_millis(160)
+            ),
+            Toggle::Show
+        );
     }
-    if x < vx {
-        x = vx + 8;
+
+    #[test]
+    fn the_blur_guard_expires_and_ignores_other_providers() {
+        let t0 = Instant::now();
+        let mut state = HIDDEN;
+        toggle_state(&mut state, ProviderId::Claude, t0);
+        blur_state(&mut state, t0);
+        assert_eq!(
+            toggle_state(&mut state, ProviderId::Claude, t0 + BLUR_REOPEN_GUARD),
+            Toggle::Show
+        );
+
+        let mut state = HIDDEN;
+        toggle_state(&mut state, ProviderId::Claude, t0);
+        blur_state(&mut state, t0);
+        assert_eq!(
+            toggle_state(
+                &mut state,
+                ProviderId::ChatGpt,
+                t0 + Duration::from_millis(10)
+            ),
+            Toggle::Show
+        );
+        assert_eq!(state.shown, Some(ProviderId::ChatGpt));
     }
-    (x, y)
+
+    #[test]
+    fn a_blur_while_hidden_records_nothing() {
+        let mut state = HIDDEN;
+        assert!(!blur_state(&mut state, Instant::now()));
+        assert_eq!(state.blur_hide, None);
+    }
+
+    #[test]
+    fn virtual_screen_is_the_union_of_the_monitors() {
+        assert_eq!(virtual_screen(&[]), None);
+        let primary = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(virtual_screen(&[primary]), Some(primary));
+        let left_above = Rect::new(-1920, -200, 0, 880);
+        assert_eq!(
+            virtual_screen(&[primary, left_above]),
+            Some(Rect::new(-1920, -200, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn panel_backgrounds_match_the_palette() {
+        assert_eq!(background(true), Color(0x1F, 0x1F, 0x1F, 0xFF));
+        assert_eq!(background(false), Color(0xFA, 0xFA, 0xFA, 0xFF));
+    }
 }

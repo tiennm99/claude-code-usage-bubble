@@ -13,6 +13,7 @@ pub mod diag;
 pub mod handoff;
 pub mod menu;
 pub mod net;
+pub mod panel;
 pub mod platform;
 pub mod runtime;
 pub mod scheduler;

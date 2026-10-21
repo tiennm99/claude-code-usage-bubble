@@ -23,7 +23,7 @@ use crate::cli::{self, CliArgs};
 use crate::core::geom::{self, Rect, DEFAULT_BUBBLE_SIZE, MAX_BUBBLE_SIZE, MIN_BUBBLE_SIZE};
 use crate::core::i18n::{I18n, LocaleStrings};
 use crate::core::menu_model::MenuCommand;
-use crate::core::payload::{self, BubblePayload, Canvas};
+use crate::core::payload::{self, BubblePayload, Canvas, PanelPayload};
 use crate::core::settings::{self, Settings};
 use crate::core::state::{Alert, PollOutcome, UpdateStatus, UsageState};
 use crate::core::visibility::{self, Visibility};
@@ -31,7 +31,7 @@ use crate::menu::{self, MenuCache, MenuSnapshot};
 use crate::scheduler::{self, Action, Message, SchedulerHost};
 use crate::tray::{self, Trays};
 use crate::usage::{self, refresh, ProviderId, Registry};
-use crate::{bubble, diag, handoff, net, platform};
+use crate::{bubble, diag, handoff, net, panel, platform};
 
 /// Event carrying a [`BubblePayload`] to a bubble webview.
 pub const BUBBLE_UPDATE_EVENT: &str = "bubble:update";
@@ -197,16 +197,26 @@ impl Runtime {
         snapshot.payload(provider, scale_factor, SystemTime::now())
     }
 
+    /// The details-panel payload for `provider`.
+    pub fn panel_payload(&self, provider: ProviderId) -> PanelPayload {
+        self.with_state(|s| panel_payload_of(s, provider))
+    }
+
     /// Push the current state to every UI surface, then re-arm the
     /// countdown for the next visible change.
     pub fn propagate(&self) {
-        let (snapshot, countdown) = self.with_state(|s| {
+        let panel_provider = panel::shown_provider();
+        let (snapshot, panel_payload, countdown) = self.with_state(|s| {
             (
                 BubbleSnapshot::of(s),
+                panel_provider.map(|p| panel_payload_of(s, p)),
                 s.usage.countdown_delay(SystemTime::now()),
             )
         });
         self.ui.emit_bubble_updates(snapshot);
+        if let Some(payload) = panel_payload {
+            panel::refresh_if_visible(&self.ui.app, payload);
+        }
         self.refresh_shell(false);
         self.send(Message::RecomputeCountdown(countdown));
     }
@@ -510,10 +520,10 @@ impl Runtime {
         self.propagate();
     }
 
-    /// A left click on a bubble. The details panel does not exist yet, so
-    /// the click is only logged.
+    /// A left click on a bubble toggles the details panel for it.
     pub fn bubble_clicked(&self, provider: ProviderId) {
-        log::debug!("bubble click on {}; no details panel yet", provider.slug());
+        log::debug!("bubble click on {}", provider.slug());
+        panel::toggle(&self.ui.app, provider);
     }
 
     /// Re-format the countdown texts after time passed and push them out.
@@ -594,6 +604,16 @@ fn poll_outcome(
             PollOutcome::Failed
         }
     }
+}
+
+/// The details-panel payload for `provider` from the state.
+fn panel_payload_of(state: &AppState, provider: ProviderId) -> PanelPayload {
+    payload::panel_payload(
+        provider,
+        state.usage.snapshots.get(&provider),
+        &state.strings,
+        state.is_dark,
+    )
 }
 
 /// Window label of a provider's bubble.
@@ -701,6 +721,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             crate::commands::get_bubble_state,
+            crate::commands::get_panel_state,
             crate::commands::get_strings,
             crate::commands::log_js,
             crate::commands::bubble_ready,
@@ -709,7 +730,10 @@ pub fn run() {
             crate::commands::bubble_resize_step,
             crate::menu::show_context_menu,
         ])
-        .on_window_event(bubble::on_window_event)
+        .on_window_event(|window, event| {
+            bubble::on_window_event(window, event);
+            panel::on_window_event(window, event);
+        })
         .on_menu_event(menu::on_menu_event)
         .on_tray_icon_event(tray::on_tray_icon_event)
         .setup(move |app| setup(app, &cli))
@@ -801,6 +825,10 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
     for provider in providers {
         bubble::create(app.handle(), provider)?;
     }
+    // The app still works without the panel; a bubble click then only logs.
+    if let Err(err) = panel::create(app.handle(), is_dark) {
+        log::error!("details panel could not be created: {err}");
+    }
     runtime.refresh_shell(true);
     runtime.deliver_pending_update_alert();
     Ok(())
@@ -830,7 +858,7 @@ fn register_notification_identity(app: &AppHandle) {
 
 /// Monitor rects in physical px. Empty when they cannot be enumerated,
 /// which keeps every saved position.
-fn monitor_rects(app: &AppHandle) -> Vec<Rect> {
+pub fn monitor_rects(app: &AppHandle) -> Vec<Rect> {
     match app.available_monitors() {
         Ok(monitors) => monitors
             .iter()

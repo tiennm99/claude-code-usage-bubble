@@ -8,7 +8,8 @@ use tauri::{AppHandle, State, WebviewWindow};
 use crate::bubble;
 use crate::core::geom::RESIZE_STEP_LOGICAL;
 use crate::core::i18n::LocaleStrings;
-use crate::core::payload::BubblePayload;
+use crate::core::payload::{BubblePayload, PanelPayload};
+use crate::panel;
 use crate::runtime::Runtime;
 use crate::usage::ProviderId;
 
@@ -26,6 +27,13 @@ pub fn get_bubble_state(
     let provider = live_provider(&provider)?;
     let scale = window.scale_factor().map_err(|err| err.to_string())?;
     Ok(runtime.bubble_payload(provider, scale))
+}
+
+/// The details-panel payload for the provider the panel last showed;
+/// `None` before the first bubble click.
+#[tauri::command]
+pub fn get_panel_state(runtime: State<'_, Arc<Runtime>>) -> Option<PanelPayload> {
+    panel::current_provider().map(|provider| runtime.panel_payload(provider))
 }
 
 /// Every UI string, camelCase keys.
@@ -54,8 +62,10 @@ pub fn bubble_ready(app: AppHandle, label: String) -> Result<(), String> {
 }
 
 /// A left click (a press released before the drag threshold) on a bubble.
+/// Async, so the panel toggle is queued to the main thread instead of
+/// running inside the webview's IPC callback.
 #[tauri::command]
-pub fn bubble_click(runtime: State<'_, Arc<Runtime>>, slug: String) -> Result<(), String> {
+pub async fn bubble_click(runtime: State<'_, Arc<Runtime>>, slug: String) -> Result<(), String> {
     let provider = live_provider(&slug)?;
     runtime.bubble_clicked(provider);
     Ok(())

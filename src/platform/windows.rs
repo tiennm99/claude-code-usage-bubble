@@ -4,10 +4,16 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use webview2_com::Microsoft::Web::WebView2::Win32::GetAvailableCoreWebView2BrowserVersionString;
-use windows::core::{HSTRING, PCWSTR, PWSTR};
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    GetAvailableCoreWebView2BrowserVersionString, ICoreWebView2Settings3,
+};
+use windows::core::{Interface, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, SetLastError, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
+};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWM_WINDOW_CORNER_PREFERENCE,
 };
 use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::Shell::{
@@ -180,8 +186,21 @@ fn hwnd_of(window: &tauri::WebviewWindow) -> io::Result<HWND> {
 /// Make a bubble a tool window that never activates: no Alt-Tab entry and
 /// no focus taken on a click or a show. Run it before the first show.
 pub fn apply_no_activate(window: &tauri::WebviewWindow) -> io::Result<()> {
+    add_ex_style(window, (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW).0)
+}
+
+/// Make the details panel a tool window, so it has no Alt-Tab entry
+/// (`skip_taskbar` only removes the taskbar button). It still activates:
+/// the panel takes focus so that losing it can dismiss the panel. Run it
+/// before the first show.
+pub fn apply_toolwindow(window: &tauri::WebviewWindow) -> io::Result<()> {
+    add_ex_style(window, WS_EX_TOOLWINDOW.0)
+}
+
+/// OR `bits` into a window's extended style and apply the frame change.
+fn add_ex_style(window: &tauri::WebviewWindow, bits: u32) -> io::Result<()> {
     let hwnd = hwnd_of(window)?;
-    let wanted = (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW).0 as isize;
+    let wanted = bits as isize;
     // SAFETY: `hwnd` is a live top-level window of this process.
     let current = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
     if current & wanted == wanted {
@@ -211,6 +230,50 @@ pub fn apply_no_activate(window: &tauri::WebviewWindow) -> io::Result<()> {
         )
     }
     .map_err(io::Error::from)
+}
+
+/// Ask DWM for rounded window corners. Only Windows 11 knows the
+/// attribute; Windows 10 returns an error and keeps square corners. DWM
+/// ignores a repeated identical value, so calling this on every show is
+/// cheap.
+pub fn round_corners(window: &tauri::WebviewWindow) -> io::Result<()> {
+    let hwnd = hwnd_of(window)?;
+    let preference = DWMWCP_ROUND;
+    // SAFETY: `hwnd` is a live window of this process; the pointer and size
+    // describe `preference`, which outlives the call.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            std::ptr::from_ref(&preference).cast(),
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        )
+    }
+    .map_err(io::Error::from)
+}
+
+/// Turn off WebView2's browser accelerator keys (F5, Ctrl+R, Ctrl+P,
+/// Ctrl+F, zoom, F12 and the like) for `window`'s webview, then reload it,
+/// because the setting applies from the next navigation. Runs on the main
+/// thread; a failure inside the webview is logged there.
+pub fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) -> io::Result<()> {
+    let label = window.label().to_string();
+    window
+        .with_webview(move |webview| {
+            // SAFETY: plain COM calls on the live controller Tauri handed
+            // over, on the main thread that owns it.
+            let result = unsafe {
+                webview.controller().CoreWebView2().and_then(|core| {
+                    let settings: ICoreWebView2Settings3 = core.Settings()?.cast()?;
+                    settings.SetAreBrowserAcceleratorKeysEnabled(false)?;
+                    core.Reload()
+                })
+            };
+            if let Err(err) = result {
+                log::warn!("{label} keeps the browser accelerator keys: {err}");
+            }
+        })
+        .map_err(|err| io::Error::other(format!("no webview for {}: {err}", window.label())))
 }
 
 /// Show a bubble without activating it. Bubbles are shown and hidden only
