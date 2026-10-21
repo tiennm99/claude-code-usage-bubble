@@ -127,6 +127,9 @@ pub struct MenuInput<'a> {
     pub strings: &'a LocaleStrings,
     pub autostart_enabled: bool,
     pub update_status: UpdateStatus,
+    /// Whether this install can apply an update in place. When it cannot
+    /// (a package-manager install), "Update available" stays greyed.
+    pub update_can_apply: bool,
 }
 
 fn action(command: MenuCommand, label: &str, enabled: bool) -> MenuEntry {
@@ -159,6 +162,13 @@ fn submenu(label: &str, entries: Vec<MenuEntry>) -> MenuEntry {
     }
 }
 
+/// The version item checks for updates, or applies one once it is
+/// available. It is greyed while either runs, and an available update stays
+/// greyed when this install cannot apply it.
+fn version_action_enabled(status: UpdateStatus, can_apply: bool) -> bool {
+    !status.is_busy() && (can_apply || status != UpdateStatus::Available)
+}
+
 /// Build the context menu in display order.
 pub fn build(input: MenuInput<'_>) -> Vec<MenuEntry> {
     let MenuInput {
@@ -166,6 +176,7 @@ pub fn build(input: MenuInput<'_>) -> Vec<MenuEntry> {
         strings: s,
         autostart_enabled,
         update_status,
+        update_can_apply,
     } = input;
 
     let freq_labels = [
@@ -230,7 +241,7 @@ pub fn build(input: MenuInput<'_>) -> Vec<MenuEntry> {
         action(
             MenuCommand::VersionAction,
             &version_action_label(update_status, s),
-            !update_status.is_busy(),
+            version_action_enabled(update_status, update_can_apply),
         ),
         submenu(&s.auto_update_check, auto_update),
     ];
@@ -290,6 +301,7 @@ mod tests {
             strings: &strings,
             autostart_enabled: true,
             update_status: status,
+            update_can_apply: true,
         })
     }
 
@@ -383,6 +395,30 @@ mod tests {
     }
 
     #[test]
+    fn available_update_is_greyed_when_it_cannot_be_applied() {
+        let strings = I18n::load().strings().clone();
+        let settings = Settings::default();
+        let menu_for = |status| {
+            build(MenuInput {
+                settings: &settings,
+                strings: &strings,
+                autostart_enabled: true,
+                update_status: status,
+                update_can_apply: false,
+            })
+        };
+        assert!(!enabled(&menu_for(UpdateStatus::Available), "version"));
+        // Checking still works on such an install.
+        for status in [
+            UpdateStatus::Idle,
+            UpdateStatus::UpToDate,
+            UpdateStatus::Failed,
+        ] {
+            assert!(enabled(&menu_for(status), "version"));
+        }
+    }
+
+    #[test]
     fn top_level_order_and_hint_rows() {
         let m = menu(&Settings::default(), UpdateStatus::Idle);
         let labels: Vec<String> = m
@@ -462,6 +498,7 @@ mod tests {
             strings: &strings,
             autostart_enabled: false,
             update_status: UpdateStatus::Idle,
+            update_can_apply: true,
         });
         let mut lines = Vec::new();
         outline(&m, 0, &mut lines);

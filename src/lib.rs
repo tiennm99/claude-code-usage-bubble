@@ -19,6 +19,7 @@ pub mod platform;
 pub mod runtime;
 pub mod scheduler;
 pub mod tray;
+pub mod update;
 pub mod usage;
 
 /// Starts the application and blocks until it exits.

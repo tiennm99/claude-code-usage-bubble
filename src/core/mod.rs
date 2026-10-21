@@ -9,4 +9,5 @@ pub mod proxy;
 pub mod settings;
 pub mod state;
 pub mod usage_color;
+pub mod version;
 pub mod visibility;

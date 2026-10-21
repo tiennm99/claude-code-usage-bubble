@@ -1,372 +1,217 @@
-// Download a release asset and swap it in through the proven `self_replace`
-// handoff path.
-//
-// The running process cannot reliably replace its own mapped image on
-// Windows. `self_replace` handles the platform-specific rename/copy sequence
-// for that case. After the replacement succeeds, we start the installed path
-// with `--wait-pid` and let the current process exit.
+//! Applying a downloaded, signature-checked update to the portable exe, and
+//! the paths under `updates_dir` that updates use.
+//!
+//! The running process cannot reliably replace its own mapped image on
+//! Windows; `self_replace` handles the rename and copy sequence for that.
+//! The caller then relaunches the installed path with `--wait-pid` and exits.
 
-use std::ffi::OsString;
+use std::fmt::Display;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use super::Error;
+use crate::handoff;
 
-use windows::core::PCWSTR;
-use windows::Win32::Storage::FileSystem::{
-    MoveFileExW, MOVEFILE_COPY_ALLOWED, MOVEFILE_REPLACE_EXISTING, MOVE_FILE_FLAGS,
-};
-use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+/// File name the download is staged under before the swap. Startup cleanup
+/// deletes a leftover one.
+const STAGED_EXE: &str = "update.exe";
 
-use crate::net::Client;
-use crate::os::to_utf16_nul;
+/// File name of the last apply failure's log.
+const ERROR_LOG: &str = "update-error.log";
 
-pub fn begin(http: &Client, release: &super::Release) -> Result<(), super::Error> {
-    match begin_inner(http, release) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            write_update_error(&e);
-            Err(e)
-        }
-    }
+/// `updates_dir()/update.exe`.
+pub fn stage_path() -> Result<PathBuf, Error> {
+    updates_file(STAGED_EXE)
 }
 
-fn begin_inner(http: &Client, release: &super::Release) -> Result<(), super::Error> {
+/// `updates_dir()/update-error.log`.
+pub fn error_log_path() -> Result<PathBuf, Error> {
+    updates_file(ERROR_LOG)
+}
+
+fn updates_file(name: &str) -> Result<PathBuf, Error> {
+    handoff::updates_dir()
+        .map(|dir| dir.join(name))
+        .ok_or_else(|| Error::NotWritable("no local data directory available".to_string()))
+}
+
+/// Replace the running executable with `bytes`.
+pub fn replace_portable(bytes: &[u8]) -> Result<(), Error> {
     let current = std::env::current_exe()?;
-    ensure_writable(&current)?;
     let staging = stage_path()?;
-    // Defense in depth: `MoveFileExW` itself is immune to `%`-expansion
-    // (no shell parses our paths), but the existing rejection guards
-    // future code paths that might invoke external tools, so keep it.
-    reject_unsafe_path(&current)?;
-    reject_unsafe_path(&staging)?;
-    if let Some(parent) = staging.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    download(
-        http,
-        &release.asset_url,
-        &staging,
-        release.asset_sha256.as_ref(),
-    )?;
-    replace_current_exe(&staging)?;
-    spawn_replaced_exe(&current, &release.version)?;
-    let _ = std::fs::remove_file(&staging);
-    Ok(())
-}
-
-/// CLI entry point for `--apply-update <target> <source> <parent-pid> <version>`.
-/// Runs from the staged new binary, waits for the old UI process to exit,
-/// replaces the installed exe, and starts the installed copy.
-pub fn run_cli(args: &[String]) -> Option<i32> {
-    if args.get(1).map(String::as_str) != Some("--apply-update") {
-        return None;
-    }
-    let Some(target) = args.get(2).map(PathBuf::from) else {
-        return Some(2);
-    };
-    let Some(source) = args.get(3).map(PathBuf::from) else {
-        return Some(2);
-    };
-    let Some(parent_pid) = args.get(4).and_then(|s| s.parse::<u32>().ok()) else {
-        return Some(2);
-    };
-    let Some(version) = args.get(5).cloned() else {
-        return Some(2);
-    };
-
-    super::handoff::wait_for_parent_exit(parent_pid, 15_000);
-    match replace_from_helper(&source, &target, &version) {
-        Ok(()) => Some(0),
-        Err(e) => {
-            log::error!("apply-update failed: {e}");
-            Some(1)
-        }
-    }
-}
-
-fn download(
-    http: &Client,
-    url: &str,
-    to: &Path,
-    expected_sha256: Option<&[u8; 32]>,
-) -> Result<(), super::Error> {
-    let resp = http
-        .get(url)
-        .header("User-Agent", super::release::user_agent())
-        .send()?;
-    if !(200..300).contains(&resp.status()) {
-        return Err(super::Error::Network(crate::net::Error::Status(
-            resp.status(),
-        )));
-    }
-    let body = resp.body();
-    if let Some(expected) = expected_sha256 {
-        let mut hasher = Sha256::new();
-        hasher.update(body);
-        let actual = hasher.finalize();
-        if actual.as_slice() != expected {
-            return Err(super::Error::ChecksumMismatch {
-                expected: hex_encode(expected),
-                actual: hex_encode(&actual),
-            });
-        }
-    }
-    std::fs::write(to, body)?;
-    Ok(())
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn reject_unsafe_path(p: &Path) -> Result<(), super::Error> {
-    let s = p.to_string_lossy();
-    if s.contains('%') {
-        return Err(super::Error::UnsafePath(format!("path contains '%': {s}")));
-    }
-    Ok(())
-}
-
-fn spawn_update_helper(
-    helper: &Path,
-    staging: &Path,
-    target: &Path,
-    version: &super::release::Version,
-) -> Result<(), super::Error> {
-    let pid = unsafe { GetCurrentProcessId() };
-    let version_str = format!("{}.{}.{}", version.major, version.minor, version.patch);
-    let args = vec![
-        OsString::from("--apply-update"),
-        target.as_os_str().to_os_string(),
-        staging.as_os_str().to_os_string(),
-        OsString::from(pid.to_string()),
-        OsString::from(version_str),
-    ];
-    super::handoff::spawn_detached(helper, &args).map_err(super::Error::Io)
-}
-
-fn replace_current_exe(staging: &Path) -> Result<(), super::Error> {
-    self_replace::self_replace(staging)
-        .map_err(|e| super::Error::SwapFailed(format!("self_replace({}): {e}", staging.display())))
-}
-
-fn spawn_replaced_exe(
-    target: &Path,
-    version: &super::release::Version,
-) -> Result<(), super::Error> {
-    let pid = unsafe { GetCurrentProcessId() };
-    let version_str = format!("{}.{}.{}", version.major, version.minor, version.patch);
-    let args = vec![
-        OsString::from("--wait-pid"),
-        OsString::from(pid.to_string()),
-        OsString::from("--updated-to"),
-        OsString::from(version_str),
-    ];
-    super::handoff::spawn_detached(target, &args).map_err(super::Error::Io)
-}
-
-fn replace_from_helper(source: &Path, target: &Path, version: &str) -> Result<(), super::Error> {
-    let backup = backup_path(target);
-    // Parent has exited, so the install target is no longer mapped.
-    move_file(target, &backup, MOVE_FILE_FLAGS(0))?;
-
-    let swap_flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED;
-    if let Err(swap_err) = move_file(source, target, swap_flags) {
-        // Compatibility for users updating from a release that invoked
-        // the downloaded binary itself as the helper. A mapped source exe
-        // may not be movable, but it can usually still be copied.
-        let copy_result = std::fs::copy(source, target);
-        if copy_result.is_err() {
-            log::error!("source move failed before copy fallback: {swap_err}");
-        }
-        if let Err(copy_err) = copy_result {
-            if let Err(revert_err) = move_file(&backup, target, MOVEFILE_REPLACE_EXISTING) {
-                log::error!("rollback also failed: {revert_err}; surfacing modal");
-                let target_name = target
-                    .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "claude-code-usage-bubble.exe".to_string());
-                surface_rollback_failure(&backup, &target_name);
-            }
-            return Err(super::Error::Io(copy_err));
-        }
-    }
-
-    let args = vec![OsString::from("--updated-to"), OsString::from(version)];
-    if let Err(spawn_err) = super::handoff::spawn_detached(target, &args) {
-        log::error!("spawn_detached failed after swap: {spawn_err}; attempting revert");
-        let _ = std::fs::remove_file(target);
-        if let Err(revert_err) = move_file(&backup, target, MOVEFILE_REPLACE_EXISTING) {
-            log::error!("post-spawn revert failed: {revert_err}");
-        }
-        return Err(super::Error::Io(spawn_err));
-    }
-
-    let _ = std::fs::remove_file(source);
-
-    Ok(())
-}
-
-fn move_file(src: &Path, dst: &Path, flags: MOVE_FILE_FLAGS) -> Result<(), super::Error> {
-    let src_w = to_utf16_nul(&src.to_string_lossy());
-    let dst_w = to_utf16_nul(&dst.to_string_lossy());
-    let result = unsafe {
-        MoveFileExW(
-            PCWSTR::from_raw(src_w.as_ptr()),
-            PCWSTR::from_raw(dst_w.as_ptr()),
-            flags,
-        )
-    };
-    result.map_err(|e| {
-        super::Error::SwapFailed(format!(
-            "MoveFileExW({} -> {}): {e}",
-            src.display(),
-            dst.display()
-        ))
+    stage_and_swap(&current, &staging, bytes, |staged| {
+        self_replace::self_replace(staged)
     })
 }
 
-fn backup_path(target: &Path) -> PathBuf {
-    let pid = unsafe { GetCurrentProcessId() };
-    let fname = target
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "exe".to_string());
-    let mut p = target.to_owned();
-    p.set_file_name(format!("{fname}.old.{pid}"));
-    p
-}
-
-fn surface_rollback_failure(backup: &Path, target_name: &str) {
-    // Pull the UI body text from i18n; the caller passes the
-    // user-meaningful filename so we can format it in-place.
-    let strings = crate::i18n::I18n::load().strings().clone();
-    let body = format!(
-        "{}{}\n\n{}",
-        strings.update_rollback_failed_body,
-        backup.display(),
-        target_name
-    );
-    let title_w = to_utf16_nul(&strings.update_failed);
-    let body_w = to_utf16_nul(&body);
-    unsafe {
-        MessageBoxW(
-            None,
-            PCWSTR::from_raw(body_w.as_ptr()),
-            PCWSTR::from_raw(title_w.as_ptr()),
-            MB_OK | MB_ICONERROR,
-        );
+/// Write `bytes` to `staging`, then `swap` it in for `target`. The staged
+/// file is removed afterwards, whether the swap worked or not.
+fn stage_and_swap(
+    target: &Path,
+    staging: &Path,
+    bytes: &[u8],
+    swap: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<(), Error> {
+    ensure_writable(target)?;
+    // No shell parses these paths today; the rejection keeps any future
+    // hand-off through an external tool safe from `%`-expansion.
+    reject_unsafe_path(target)?;
+    reject_unsafe_path(staging)?;
+    if let Some(parent) = staging.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    std::fs::write(staging, bytes)?;
+    let swapped = swap(staging).map_err(|e| {
+        Error::SwapFailed(format!(
+            "self_replace({} -> {}): {e}",
+            staging.display(),
+            target.display()
+        ))
+    });
+    if let Err(err) = std::fs::remove_file(staging) {
+        log::debug!("staged update {} not removed: {err}", staging.display());
+    }
+    swapped
 }
 
-fn stage_path() -> Result<PathBuf, super::Error> {
-    let base = dirs::data_local_dir().ok_or_else(|| {
-        super::Error::NotWritable("no local data directory available".to_string())
-    })?;
-    Ok(base
-        .join("ClaudeCodeUsageBubble")
-        .join("updates")
-        .join("update.exe"))
+/// Fail early when the install directory cannot take a new file, which
+/// `self_replace` needs.
+fn ensure_writable(target: &Path) -> Result<(), Error> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| Error::NotWritable("could not resolve install directory".to_string()))?;
+    let probe = parent.join(".__bubble_update_probe");
+    std::fs::write(&probe, b"").map_err(|e| Error::NotWritable(e.to_string()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
-fn update_error_log_path() -> Result<PathBuf, super::Error> {
-    let base = dirs::data_local_dir().ok_or_else(|| {
-        super::Error::NotWritable("no local data directory available".to_string())
-    })?;
-    Ok(base
-        .join("ClaudeCodeUsageBubble")
-        .join("updates")
-        .join("update-error.log"))
+fn reject_unsafe_path(p: &Path) -> Result<(), Error> {
+    let s = p.to_string_lossy();
+    if s.contains('%') {
+        return Err(Error::UnsafePath(format!("path contains '%': {s}")));
+    }
+    Ok(())
 }
 
-fn write_update_error(error: &super::Error) {
-    let Ok(path) = update_error_log_path() else {
-        return;
+/// Record an apply failure in `update-error.log`, replacing the previous
+/// entry. Failures to write it are only logged.
+pub fn write_update_error(error: &impl Display) {
+    let path = match error_log_path() {
+        Ok(path) => path,
+        Err(err) => {
+            log::warn!("update error log skipped: {err}");
+            return;
+        }
     };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let ts = std::time::SystemTime::now()
+    let unix_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or_default();
-    let body = format!("unix_time={ts}\nerror={error}\n");
-    let _ = std::fs::write(path, body);
-}
-
-fn helper_path() -> Result<PathBuf, super::Error> {
-    let base = dirs::data_local_dir().ok_or_else(|| {
-        super::Error::NotWritable("no local data directory available".to_string())
-    })?;
-    let pid = unsafe { GetCurrentProcessId() };
-    Ok(base
-        .join("ClaudeCodeUsageBubble")
-        .join("updates")
-        .join(format!("updater-helper-{pid}.exe")))
-}
-
-fn prepare_update_helper(current: &Path, helper: &Path) -> Result<(), super::Error> {
-    if let Some(parent) = helper.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(current, helper)?;
-    Ok(())
-}
-
-pub fn cleanup_staged_update_files() {
-    let Ok(stage) = stage_path() else {
-        return;
-    };
-    let Some(dir) = stage.parent() else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name == "update.exe" || (name.starts_with("updater-helper-") && name.ends_with(".exe")) {
-            if let Err(e) = std::fs::remove_file(&path) {
-                log::debug!("cleanup_staged_update_files: remove {:?} failed: {e}", path);
-            }
-        }
+    if let Err(err) = std::fs::write(&path, error_log_body(unix_time, error)) {
+        log::warn!("update error log {} not written: {err}", path.display());
     }
 }
 
-fn ensure_writable(target: &Path) -> Result<(), super::Error> {
-    let parent = target.parent().ok_or_else(|| {
-        super::Error::NotWritable("could not resolve install directory".to_string())
-    })?;
-    let probe = parent.join(".__bubble_update_probe");
-    std::fs::write(&probe, b"").map_err(|e| super::Error::NotWritable(e.to_string()))?;
-    let _ = std::fs::remove_file(&probe);
-    Ok(())
+/// The log format every release has written.
+fn error_log_body(unix_time: u64, error: &impl Display) -> String {
+    format!("unix_time={unix_time}\nerror={error}\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("ccub-install-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
 
     #[test]
-    fn stage_and_helper_paths_are_distinct_exes() {
-        let stage = stage_path().expect("stage path");
-        let helper = helper_path().expect("helper path");
+    fn staging_and_log_paths_sit_in_the_updates_dir() {
+        let (Ok(stage), Ok(log)) = (stage_path(), error_log_path()) else {
+            // No local data dir on this host; the error path is covered by
+            // the `NotWritable` mapping.
+            return;
+        };
+        let dir = handoff::updates_dir().expect("updates dir");
+        assert_eq!(stage, dir.join("update.exe"));
+        assert_eq!(log, dir.join("update-error.log"));
+    }
 
-        assert_eq!(stage.file_name().unwrap(), "update.exe");
-        assert!(helper
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("updater-helper-"));
-        assert_ne!(stage, helper);
+    #[test]
+    fn swap_gets_the_staged_bytes_and_the_stage_is_removed() {
+        let root = scratch_dir("swap");
+        let target = root.join("app.exe");
+        std::fs::write(&target, b"old").expect("target");
+        let staging = root.join("updates").join("update.exe");
+
+        stage_and_swap(&target, &staging, b"new", |staged| {
+            std::fs::copy(staged, &target).map(|_| ())
+        })
+        .expect("swap");
+
+        assert_eq!(std::fs::read(&target).expect("read"), b"new");
+        assert!(!staging.exists());
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn failed_swap_keeps_the_target_and_removes_the_stage() {
+        let root = scratch_dir("fail");
+        let target = root.join("app.exe");
+        std::fs::write(&target, b"old").expect("target");
+        let staging = root.join("update.exe");
+
+        let err = stage_and_swap(&target, &staging, b"new", |_| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "locked"))
+        })
+        .expect_err("swap fails");
+
+        assert!(matches!(err, Error::SwapFailed(ref m) if m.contains("locked")));
+        assert_eq!(std::fs::read(&target).expect("read"), b"old");
+        assert!(!staging.exists());
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn percent_paths_are_rejected_before_anything_is_written() {
+        let root = scratch_dir("unsafe");
+        let target = root.join("app.exe");
+        let staging = root.join("%TEMP%").join("update.exe");
+
+        let err = stage_and_swap(&target, &staging, b"new", |_| Ok(())).expect_err("rejected");
+
+        assert!(matches!(err, Error::UnsafePath(_)));
+        assert!(!staging.exists());
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn missing_install_dir_is_not_writable() {
+        let root = scratch_dir("missing");
+        let target = root.join("absent").join("app.exe");
+        let err = stage_and_swap(&target, &root.join("update.exe"), b"new", |_| Ok(()))
+            .expect_err("not writable");
+        assert!(matches!(err, Error::NotWritable(_)));
+        std::fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn error_log_keeps_its_format() {
+        assert_eq!(
+            error_log_body(1_700_000_000, &"network: timed out"),
+            "unix_time=1700000000\nerror=network: timed out\n"
+        );
     }
 }

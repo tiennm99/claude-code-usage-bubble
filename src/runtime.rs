@@ -30,6 +30,7 @@ use crate::core::visibility::{self, Visibility};
 use crate::menu::{self, MenuCache, MenuSnapshot};
 use crate::scheduler::{self, Action, Message, SchedulerHost};
 use crate::tray::{self, Trays};
+use crate::update::{self, CheckOutcome};
 use crate::usage::{self, refresh, ProviderId, Registry};
 use crate::{bubble, diag, fullscreen, handoff, net, panel, platform};
 
@@ -71,6 +72,9 @@ pub struct AppState {
     pub visibility: Visibility,
     pub usage: UsageState,
     pub update_status: UpdateStatus,
+    /// How this copy was installed, which decides whether an available
+    /// update can be applied.
+    pub update_channel: update::Channel,
     /// The "update applied" alert from `--updated-to`, shown once the
     /// notification backend is up.
     pub pending_update_alert: Option<Alert>,
@@ -164,6 +168,9 @@ pub struct Runtime {
     /// At most one poll runs at a time; a Refresh spam or a timer firing
     /// during a slow poll is dropped instead of stacking requests.
     poll_in_flight: AtomicBool,
+    /// The release the last check found, applied by the version menu item.
+    /// Never locked together with `state`.
+    pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
     scheduler: Sender<Message>,
     trays: Trays,
     menu_cache: MenuCache,
@@ -388,7 +395,7 @@ impl Runtime {
             MenuCommand::ToggleProvider(provider) => self.toggle_provider(provider),
             MenuCommand::Autostart => menu::toggle_autostart(&self.ui.app),
             MenuCommand::ResetPosition => self.reset_positions(),
-            MenuCommand::VersionAction => self.check_for_updates(),
+            MenuCommand::VersionAction => self.version_action(),
             MenuCommand::UpdateInterval(secs) => self.set_update_interval(secs),
             MenuCommand::SizeSmaller => self.resize_bubbles(-geom::RESIZE_STEP_LOGICAL),
             MenuCommand::SizeLarger => self.resize_bubbles(geom::RESIZE_STEP_LOGICAL),
@@ -532,11 +539,168 @@ impl Runtime {
         self.propagate();
     }
 
-    /// The update check, automatic or from the menu. No updater is
-    /// registered in this build, so the deadline stays disarmed until a
-    /// check reports back.
-    fn check_for_updates(&self) {
-        log::debug!("update check due; no updater is registered");
+    /// The version menu item: apply the update the last check found, or
+    /// check again.
+    fn version_action(self: &Arc<Self>) {
+        let (status, can_apply) =
+            self.with_state(|s| (s.update_status, s.update_channel.can_apply()));
+        if status == UpdateStatus::Available && can_apply {
+            self.apply_update();
+        } else {
+            self.check_for_updates();
+        }
+    }
+
+    /// Run an update check on a worker thread, automatic or from the menu.
+    /// The scheduler re-arms the automatic check once it reports back.
+    fn check_for_updates(self: &Arc<Self>) {
+        let (previous, interval_secs) = self.with_state(|s| {
+            let previous = s.update_status;
+            if !previous.is_busy() {
+                s.update_status = UpdateStatus::Checking;
+            }
+            (previous, s.settings.update_check_interval_secs)
+        });
+        match previous {
+            UpdateStatus::Checking => {
+                // The running check re-arms the schedule when it finishes.
+                log::debug!("update check already running");
+                return;
+            }
+            UpdateStatus::Applying => {
+                // The apply may fail and keep this process running, so the
+                // automatic check must stay armed.
+                log::debug!("update check skipped while an update is applied");
+                self.send(Message::UpdateCheckDone { interval_secs });
+                return;
+            }
+            _ => {}
+        }
+        self.refresh_shell(false);
+        let runtime = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("update-check".into())
+            .spawn(move || runtime.run_update_check());
+        if let Err(err) = spawned {
+            log::error!("update check thread could not start: {err}");
+            self.with_state(|s| s.update_status = UpdateStatus::Failed);
+            self.send(Message::UpdateCheckDone { interval_secs });
+            self.refresh_shell(false);
+        }
+    }
+
+    /// Blocking body of [`Self::check_for_updates`].
+    fn run_update_check(&self) {
+        let proxy = if net::env_proxy().is_some() {
+            None
+        } else {
+            update::proxy_url(self.http.system_proxy())
+        };
+        let outcome = update::check(&self.ui.app, proxy);
+        let now_unix = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let (status, found) = match outcome {
+            Ok(CheckOutcome::UpToDate) => {
+                log::info!("update check: up to date");
+                (UpdateStatus::UpToDate, None)
+            }
+            Ok(CheckOutcome::Available(found)) => {
+                log::info!("update check: {} available", found.version);
+                (UpdateStatus::Available, Some(found))
+            }
+            Err(err) => {
+                log::warn!("update check failed: {err}");
+                (UpdateStatus::Failed, None)
+            }
+        };
+        // Stored before the status, so "Update available" always has a
+        // release behind it.
+        *self
+            .pending_update
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = found;
+        let (snapshot, interval_secs) = self.with_state(|s| {
+            s.update_status = status;
+            s.settings.last_update_check_unix = Some(now_unix);
+            (s.settings.clone(), s.settings.update_check_interval_secs)
+        });
+        if let Err(err) = settings::save(&snapshot) {
+            log::warn!("settings save failed: {err}");
+        }
+        self.send(Message::UpdateCheckDone { interval_secs });
+        self.refresh_shell(false);
+    }
+
+    /// Download and install the release the last check found on a worker
+    /// thread, then relaunch into it.
+    fn apply_update(self: &Arc<Self>) {
+        // Claim the apply in one step, so a check that started since the
+        // click cannot run alongside it.
+        let channel = self.with_state(|s| {
+            (s.update_status == UpdateStatus::Available).then(|| {
+                s.update_status = UpdateStatus::Applying;
+                s.update_channel
+            })
+        });
+        let Some(channel) = channel else {
+            log::debug!("update apply skipped, no update is available any more");
+            return;
+        };
+        let found = self
+            .pending_update
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(found) = found else {
+            // Nothing to apply after all; a fresh check sorts the state out.
+            self.with_state(|s| s.update_status = UpdateStatus::Idle);
+            self.check_for_updates();
+            return;
+        };
+        self.refresh_shell(false);
+        let runtime = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("update-apply".into())
+            .spawn(move || runtime.run_update_apply(found, channel));
+        if let Err(err) = spawned {
+            log::error!("update apply thread could not start: {err}");
+            self.update_failed(&update::Error::Io(err));
+        }
+    }
+
+    /// Blocking body of [`Self::apply_update`].
+    fn run_update_apply(&self, found: tauri_plugin_updater::Update, channel: update::Channel) {
+        let installed = match update::apply(found, channel) {
+            Ok(version) => version,
+            Err(err) => {
+                self.update_failed(&err);
+                return;
+            }
+        };
+        log::info!("update {installed} installed; relaunching");
+        let snapshot = self.with_state(|s| s.settings.clone());
+        if let Err(err) = settings::save(&snapshot) {
+            log::warn!("settings save before the update relaunch failed: {err}");
+        }
+        let args = [
+            OsString::from("--updated-to"),
+            OsString::from(installed.to_string()),
+        ];
+        if let Err(err) = self.relaunch_and_exit(&args) {
+            // The new binary is in place but not running; the next restart
+            // or login starts it.
+            self.update_failed(&update::Error::Relaunch(err));
+        }
+    }
+
+    /// Record a failed apply: Failed status plus `update-error.log`.
+    fn update_failed(&self, err: &update::Error) {
+        log::error!("update apply failed: {err}");
+        update::install::write_update_error(err);
+        self.with_state(|s| s.update_status = UpdateStatus::Failed);
+        self.refresh_shell(false);
     }
 
     /// Spawn the next instance with `--wait-pid` plus `extra_args`, then
@@ -719,6 +883,8 @@ pub fn run() {
 
     let app = builder
         .plugin(tauri_plugin_notification::init())
+        // Driven from Rust only; no capability exposes it to the webviews.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             crate::commands::get_bubble_state,
             crate::commands::get_panel_state,
@@ -780,6 +946,7 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
         visibility: Visibility::from_widget_visible(settings.widget_visible),
         usage: UsageState::default(),
         update_status: UpdateStatus::Idle,
+        update_channel: update::current_channel(),
         pending_update_alert: cli
             .updated_to
             .clone()
@@ -802,6 +969,7 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
         http,
         registry: Mutex::new(Registry::with_defaults()),
         poll_in_flight: AtomicBool::new(false),
+        pending_update: Mutex::new(None),
         scheduler: tx,
         trays: Trays::default(),
         menu_cache: MenuCache::default(),
@@ -974,6 +1142,7 @@ mod tests {
             visibility: Visibility::default(),
             usage: UsageState::default(),
             update_status: UpdateStatus::Idle,
+            update_channel: update::Channel::Portable,
             pending_update_alert: None,
         };
         let snapshot = BubbleSnapshot::of(&state);

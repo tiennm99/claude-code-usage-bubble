@@ -16,7 +16,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
+    "targets": ["appimage",
+      "deb"
+    ],
     "createUpdaterArtifacts": false,
     "copyright": "Copyright (C) 2026 tiennm99",
     "publisher": "tiennm99",
@@ -28,5 +30,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": [
+        "https://github.com/tiennm99/claude-code-usage-bubble/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

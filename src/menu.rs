@@ -28,6 +28,7 @@ pub struct MenuSnapshot {
     settings: Settings,
     strings: LocaleStrings,
     update_status: UpdateStatus,
+    update_can_apply: bool,
 }
 
 impl MenuSnapshot {
@@ -36,6 +37,7 @@ impl MenuSnapshot {
             settings: state.settings.clone(),
             strings: state.strings.clone(),
             update_status: state.update_status,
+            update_can_apply: state.update_channel.can_apply(),
         }
     }
 
@@ -46,6 +48,7 @@ impl MenuSnapshot {
             strings: &self.strings,
             autostart_enabled,
             update_status: self.update_status,
+            update_can_apply: self.update_can_apply,
         })
     }
 }
@@ -248,6 +251,7 @@ mod tests {
             settings,
             strings: I18n::load().strings().clone(),
             update_status: UpdateStatus::Idle,
+            update_can_apply: true,
         }
     }
 
