@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "App runtime: state, scheduler, CLI, single instance"
-status: pending
+status: completed
 priority: P1
 effort: "5h"
 dependencies: [3]
@@ -61,6 +61,57 @@ command and event bridge. All of it lives in the lib (D1); `run()` is the entry.
 1. Write `cli.rs` as a pure argv parser, with tests for `--diagnose`, `--wait-pid`, `--updated-to` alone and combined, and an ignored unknown flag.
 2. Build `AppState`, the scheduler and propagate. Use a fake emitter trait so the scheduler's deadline logic is unit-testable without a window, including "Weekly to Daily with the last check 2 days ago checks at once".
 3. Wire the commands. Leave bubble creation to Phase 06; the test window from Phase 01 renders the payload as raw JSON for now.
+
+## Todo
+
+- [x] `src/cli.rs`: pure parser for `--diagnose`, `--wait-pid <pid>` and `--updated-to <v>` (alone and combined); unknown flags, `--apply-update`, pid 0 and non-version values are ignored; arguments read with `args_os`
+- [x] Pre-Builder order in `runtime::run()`: diag, `cfg(windows)` WebView2 guard with `message_box_error` and exit 0, `--wait-pid` wait capped at 15 s and logged, Linux `GDK_BACKEND=x11` rule, single-instance plugin first with a no-op callback, no other plugin
+- [x] `platform::wait_pid`: `kill(pid, 0)` every 100 ms on Unix, `OpenProcess`/`WaitForSingleObject` on Windows; `platform::windows::{webview2_available, message_box_error, is_dark}`
+- [x] `setup()`: settings load, `drop_offscreen_positions` against `available_monitors()`, theme read, `AppState` behind one mutex with `with_state`, `UiBridge` holding the `AppHandle`, startup cleanup, scheduler start, first poll
+- [x] `src/handoff.rs`: `relaunch(extra_args) -> io::Result<()>` (`$APPIMAGE` or `current_exe`, `--wait-pid <pid>`, Windows creation flags, own process group on Unix) and `cleanup_stale_files` with a temp-dir test
+- [x] `src/scheduler.rs`: `PollNow`, `SetPollInterval`, `RecomputeCountdown`, `SetUpdateInterval`, `UpdateCheckDone`, `Shutdown`; pure `Deadlines` tested with a fake host, including "Weekly to Daily with the last check 2 days ago checks at once"
+- [x] Poll worker: `AtomicBool` gate, registry poll, `apply_results`, CLI refresh (8 s each, session-expired alert for the first provider not `Refreshed`, no re-poll), then `propagate()`
+- [x] `propagate()`: snapshot under the lock, payloads built and emitted to `bubble-<slug>` from the main thread, countdown re-armed
+- [x] Commands `get_bubble_state`, `get_strings`, `log_js`, `bubble_ready`, with argument validation
+- [x] `RunEvent::ExitRequested { code: None }` prevents exit; `RunEvent::Exit` stops the scheduler; bubbles `prevent_close`
+- [x] Restart (save, `relaunch(&[])`, exit only on `Ok`) and Exit on `Runtime`
+- [x] `--updated-to` stored as a pending `UpdateApplied` alert
+- [x] Deleted `src/app.rs` and `src/update/handoff.rs`
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (155 passed, 1 ignored), `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle`
+- [x] CI Windows, Linux and macOS rows green
+- [ ] Linux desktop (X11) and Windows manual checks; they need a display and the Restart/Exit menu, which arrives with the menu work
+
+## Implementation notes
+
+- `GDK_BACKEND=x11` is set only when `DISPLAY` is also set. With
+  `WAYLAND_DISPLAY` but no X server, forcing x11 would stop GTK from starting
+  at all, so the native Wayland backend stays and positioning features become
+  no-ops later (D12).
+- On Windows the parent wait is one `WaitForSingleObject` with the 15 s
+  timeout instead of 100 ms polls: it returns as soon as the process exits and
+  holds the handle, so a reused pid cannot be mistaken for the parent.
+- `--wait-pid 0` is rejected: on Unix `kill(0, 0)` addresses the process group.
+  `--updated-to` accepts only version-like text (digits first, then
+  `[0-9A-Za-z.+-]`, at most 64 chars), because it ends up in a notification.
+- The scheduler floors the poll interval at 10 s and the update interval at
+  60 s, so a hand-edited `0` cannot become a busy loop. The update deadline is
+  cleared when a check fires and only `UpdateCheckDone` re-arms it.
+- The scheduler channel is created before the thread starts, so the runtime
+  holds its sender before the first action runs.
+- The update check action and the alert delivery are hooks: no updater or
+  notification plugin is registered yet (D8, D9), so a due check only logs and
+  alerts reach the diagnostic log. The pending update-applied alert waits in
+  `AppState::pending_update_alert`. `tray::sync`, `menu::refresh` and
+  `panel::refresh_if_visible` join `propagate()` with their modules.
+- `bubble_ready` shows the window with `show()` until the no-activation show
+  path exists (D5).
+- The scaffold window is now labelled `bubble-<first enabled provider>`, is a
+  decorated 460x420 window, renders the payload JSON from `get_bubble_state`
+  and `bubble:update`, and forwards errors through `log_js`. Like every bubble
+  it ignores close requests.
+- `LocaleStrings` derives `Serialize` (camelCase) for `get_strings`.
+- `src/update/mod.rs` and `install.rs` still name the deleted `handoff`
+  module. They are outside the module tree; the updater rewrite replaces them.
 
 ## Validation
 
