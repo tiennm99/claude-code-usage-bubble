@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: "Menu, tray, alerts, autostart"
-status: pending
+status: completed
 priority: P1
 effort: "6h"
 dependencies: [4]
@@ -61,6 +61,38 @@ for the alerts (D9).
 2. Build the menu mapping. Add a test that walks the `tauri::menu`-independent model, so it can run headless.
 3. Add the tray and autostart.
 4. Run the toast spike, then register the notification plugin and wire the alerts.
+
+## Todo
+
+- [x] `src/badge.rs`: moved from `src/tray/badge.rs` without the HICON code; `demultiplied_rgba` for `Image::new_owned`; pixel tests for the disk centre, the track at radius 12.15, the arc at 12 o'clock for every percent above 0, a quarter sweep, transparent corners, and demultiply
+- [x] `src/menu.rs`: `core::menu_model` mapped onto `Menu`, `Submenu`, `CheckMenuItem`, `MenuItem` (hints disabled) and separators; autostart check from `autolaunch().is_enabled()`; one `on_menu_event` that runs the command and then rebuilds every tray menu (also for no-op clicks); `show_context_menu(label)` with `SetForegroundWindow` first on Windows
+- [x] Headless menu test: the full tree (order, labels, ids, check and grey states) walked in `core::menu_model`
+- [x] `src/tray.rs`: one `TrayIconBuilder::with_id(slug)` per enabled live provider in `LIVE_USAGE` order, `show_menu_on_left_click(false)`, left `Click`/`Up` toggles the widget, badge always dark, tooltip from `tray_tooltip` cut to 127 UTF-16 units, `set_icon`/`set_tooltip` only on a changed `(pct, colour)` or text
+- [x] Linux: `platform::linux::appindicator_available()` probes `libayatana-appindicator3.so.1` then `libappindicator3.so.1`; without either the tray is skipped and logged; other tray errors are logged
+- [x] Autostart plugin with `app_name("ClaudeCodeUsageBubble")`, no args, `MacosLauncher::LaunchAgent` on macOS; Windows and Linux plugin source checked (notes below); no migration code needed
+- [x] `platform::windows::register_aumid()` (HKCU `AppUserModelId` key with `DisplayName` and `IconUri`, PNG under `data_local_dir()/ClaudeCodeUsageBubble/icon.png`, `SetCurrentProcessExplicitAppUserModelID`) run in `setup()` before any toast
+- [x] `tauri-plugin-notification` shows the `apply_results` and session-expired alerts and the pending "Update applied" alert (no cooldown), after the first tray sync
+- [x] Provider toggle: at-least-one invariant, bubble window created or destroyed (stand-in window until the real bubble), tray sync, menu rebuild, poll
+- [x] `propagate()` now syncs the trays and rebuilds the menus when the tree changed
+- [x] Deleted `src/tray/mod.rs`, `src/tray/callback.rs`, `src/os/registry.rs` (and `src/os/theme.rs`, its only user)
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (168 passed, 1 ignored), `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle`
+- [ ] Windows toast spike on Windows 10 and 11 from the CI artifact (manual; no Windows machine here)
+- [ ] Linux desktop (X11) and Windows manual checks below
+
+## Implementation notes
+
+- **Autostart plugin findings** (`tauri-plugin-autostart` 2.7.0 on `auto-launch` 0.6.0):
+  - Windows `enable()` writes the `Run` value data as `"<app_path> <args joined>"`, so with no args it is the **unquoted** exe path plus a trailing space. The legacy data was the quoted path.
+  - Windows `is_enabled()` only checks that the `Run` value exists (in HKLM or HKCU) and is not disabled in `StartupApproved\Run`; it never compares the data. A legacy entry therefore shows checked and no data rewrite is written.
+  - Windows `enable()` also writes the "enabled" bytes to `StartupApproved\Run` when that key exists. That only happens when the user ticks the item, which is the user re-enabling; our own code never touches `StartupApproved`, and `is_enabled()` honours a Task Manager disable.
+  - The plugin Builder does not expose the Windows enable mode, so `auto-launch`'s default `Dynamic` applies: `enable()` tries HKLM first and falls back to HKCU on access denied. Only an elevated process writes HKLM. `disable()` removes both.
+  - Linux `enable()` writes `~/.config/autostart/ClaudeCodeUsageBubble.desktop`, and the plugin uses `$APPIMAGE` (Tauri's `env().appimage`) as the path when it is set, so no entry of our own is needed. The `Exec` path is not quoted.
+- `menu::refresh` is `Runtime::refresh_shell(force)`: it snapshots state, then on the main thread syncs the trays and, when the menu tree differs from the last one applied (or after any menu click), gives every tray a freshly built menu. Countdown ticks and polls therefore rebuild no menu unless something in it changed.
+- Each tray gets its own `Menu` instance; the bubble right-click builds a fresh one and pops it from the main thread after the async command returns.
+- The bubble windows are still the decorated JSON stand-ins; one is created per enabled provider. A window destroyed by a provider toggle is recreated from its `Destroyed` event if the provider is enabled again, except while the process is exiting. Widget show/hide uses Tauri `show`/`hide` until the no-activation path exists. Reset position and size changes update and save the settings and push new payloads; moving and resizing windows arrives with the bubble window.
+- The version item calls the update-check hook, which still only logs until the updater exists.
+- The stand-in page forwards `contextmenu` to `show_context_menu` so the menu can be checked before the real bubble UI.
+- The Windows toast spike could not run here. The AUMID registration and the notification wiring are implemented; the toast check stays a manual Windows check on the CI artifact, and if no toast appears the alerts need the user's decision before more work.
 
 ## Validation
 
