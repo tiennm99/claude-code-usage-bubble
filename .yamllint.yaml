@@ -1,0 +1,10 @@
+# GitHub Actions workflows: `on:` is a key, not a boolean, the files carry
+# no document marker, and long shell lines read better unwrapped.
+extends: default
+
+rules:
+  document-start: disable
+  truthy:
+    check-keys: false
+  line-length:
+    max: 140
