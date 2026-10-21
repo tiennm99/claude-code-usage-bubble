@@ -28,7 +28,8 @@ below matters: bump Cargo *before* you tag.
    The build jobs need the `TAURI_SIGNING_PRIVATE_KEY` and
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets and a non-empty
    `plugins.updater.pubkey` in `tauri.conf.json`; the workflow fails
-   before building without them.
+   before building without them. Only the steps that sign see the key:
+   dependency installs and compilation run without it.
 
 ## Testing without a real tag
 

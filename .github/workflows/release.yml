@@ -76,12 +76,14 @@ jobs:
     name: Windows x64
     needs: prepare
     runs-on: windows-latest
-    env:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    # The updater signing key decides what every installed client will
+    # install, so only the steps that check or use it see it: never
+    # `npm ci` install scripts, the setup actions or crate build scripts.
     steps:
       - name: Refuse a missing signing key
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY//[[:space:]]/}" ]; then
             echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is empty; an unsigned build cannot be released."
@@ -113,6 +115,8 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           exe=target/release/claude-code-usage-bubble.exe
           npx tauri signer sign --app-version "$VERSION" "$exe"
@@ -131,11 +135,11 @@ jobs:
     name: Linux x64
     needs: prepare
     runs-on: ubuntu-22.04
-    env:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    # As on Windows, only the steps that check or use the signing key see it.
     steps:
       - name: Refuse a missing signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY//[[:space:]]/}" ]; then
             echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is empty; an unsigned build cannot be released."
@@ -163,12 +167,18 @@ jobs:
 
       - run: npm ci
 
-      - name: Build the AppImage and deb with updater signatures
+      # Compile without the key, then bundle and sign with it: `tauri bundle`
+      # packages the binary already built and runs no cargo build scripts.
+      - run: npm run tauri build -- --no-bundle -- --locked
+
+      - name: Bundle the AppImage and deb with updater signatures
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: >-
-          npm run tauri build --
+          npm run tauri bundle --
           --bundles appimage,deb
           --config '{"bundle":{"createUpdaterArtifacts":true}}'
-          -- --locked
 
       # The bundler names outputs after productName, which has spaces, and
       # GitHub rewrites spaces in asset names, so the URLs in latest.json

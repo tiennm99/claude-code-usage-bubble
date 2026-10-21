@@ -30,7 +30,9 @@ host has no patchelf and no display.
   - Triggers: tag `v*.*.*`, or `workflow_dispatch` with a `tag` input (a draft release). Keep the tag-equals-`Cargo.toml`-version check.
   - Every build job runs `npm ci` and passes
     `--config '{"bundle":{"createUpdaterArtifacts":true}}'` where bundles are
-    built, with `TAURI_SIGNING_PRIVATE_KEY` and `_PASSWORD` in the environment.
+    built. `TAURI_SIGNING_PRIVATE_KEY` and `_PASSWORD` are step-level env on
+    the steps that check or use them only, never job-level, so `npm ci`
+    install scripts, setup actions and crate build scripts never see the key.
     A signing step fails hard when the key variable is empty.
   - Keep the step that fails before any build when `plugins.updater.pubkey` in
     `tauri.conf.json` is empty. `build.rs` only checks the key when
@@ -44,7 +46,8 @@ host has no patchelf and no display.
     - Upload the exe and its `.sig`.
   - **linux-x64** job (`ubuntu-22.04`):
     - Install the Phase 01 apt list plus `patchelf`.
-    - `npm run tauri build -- --bundles appimage,deb --config …`.
+    - `npm run tauri build -- --no-bundle -- --locked` without the key, then
+      `npm run tauri bundle -- --bundles appimage,deb --config …` with it.
     - Rename every output to space-free kebab names before upload, because the
       bundler names them after `productName` and GitHub rewrites spaces in asset
       names: `claude-code-usage-bubble_<ver>_amd64.AppImage`, the matching
@@ -67,10 +70,12 @@ host has no patchelf and no display.
   rollback for Tauri clients; `workflow_dispatch` with `ref`, `version`, `tag`
   and a `draft` input that defaults to `true`): checks out `ref`, patches the
   `Cargo.toml` version, runs `cargo build --release --locked`, signs the exe
-  with `tauri signer sign` (CLI from `npx --yes @tauri-apps/cli@2`, since the
-  legacy ref has no `package.json`), runs `make-latest-json.js --windows-only`
+  with `tauri signer sign` (CLI from `npm ci --prefix current` on the default
+  branch's lockfile, since the legacy ref has no `package.json`), runs `make-latest-json.js --windows-only`
   (from the current default branch) and publishes `claude-code-usage-bubble.exe`,
-  its `.sig` and the Windows-only `latest.json`. Tauri Linux clients get
+  its `.sig` and the Windows-only `latest.json`. The build job runs with
+  `contents: read` and `persist-credentials: false` and uploads an artifact; a
+  separate publish job holds `contents: write`, as in `release.yml`. Tauri Linux clients get
   `TargetNotFound`, which Phase 09 maps to Up to date. The v0.5.0 sources accept
   the Tauri relaunch args `--wait-pid <pid> --updated-to X`
   (`git show v0.5.0:src/main.rs`, lines 42 and 54).
