@@ -1,7 +1,7 @@
 ---
 phase: 5
 title: "Menu, tray, alerts, autostart"
-status: completed
+status: in-progress
 priority: P1
 effort: "6h"
 dependencies: [4]
@@ -69,14 +69,14 @@ for the alerts (D9).
 - [x] Headless menu test: the full tree (order, labels, ids, check and grey states) walked in `core::menu_model`
 - [x] `src/tray.rs`: one `TrayIconBuilder::with_id(slug)` per enabled live provider in `LIVE_USAGE` order, `show_menu_on_left_click(false)`, left `Click`/`Up` toggles the widget, badge always dark, tooltip from `tray_tooltip` cut to 127 UTF-16 units, `set_icon`/`set_tooltip` only on a changed `(pct, colour)` or text
 - [x] Linux: `platform::linux::appindicator_available()` probes `libayatana-appindicator3.so.1` then `libappindicator3.so.1`; without either the tray is skipped and logged; other tray errors are logged
-- [x] Autostart plugin with `app_name("ClaudeCodeUsageBubble")`, no args, `MacosLauncher::LaunchAgent` on macOS; Windows and Linux plugin source checked (notes below); no migration code needed
+- [x] Autostart plugin with `app_name("ClaudeCodeUsageBubble")`, no args, `MacosLauncher::LaunchAgent` on macOS (Linux and macOS); Windows pinned to a current-user entry with the quoted exe path through `auto-launch` directly (notes below); no migration code needed
 - [x] `platform::windows::register_aumid()` (HKCU `AppUserModelId` key with `DisplayName` and `IconUri`, PNG under `data_local_dir()/ClaudeCodeUsageBubble/icon.png`, `SetCurrentProcessExplicitAppUserModelID`) run in `setup()` before any toast
 - [x] `tauri-plugin-notification` shows the `apply_results` and session-expired alerts and the pending "Update applied" alert (no cooldown), after the first tray sync
 - [x] Provider toggle: at-least-one invariant, bubble window created or destroyed (stand-in window until the real bubble), tray sync, menu rebuild, poll
 - [x] `propagate()` now syncs the trays and rebuilds the menus when the tree changed
 - [x] Deleted `src/tray/mod.rs`, `src/tray/callback.rs`, `src/os/registry.rs` (and `src/os/theme.rs`, its only user)
 - [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (168 passed, 1 ignored), `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle`
-- [ ] Windows toast spike on Windows 10 and 11 from the CI artifact (manual; no Windows machine here)
+- [ ] Windows toast spike on Windows 10 and 11 from the CI artifact (manual; no Windows machine here). This is the D9 gate and the phase stays in progress until it passes; the alert wiring already exists, so a failed spike goes to the user before Phase 06 builds on it
 - [ ] Linux desktop (X11) and Windows manual checks below
 
 ## Implementation notes
@@ -85,11 +85,11 @@ for the alerts (D9).
   - Windows `enable()` writes the `Run` value data as `"<app_path> <args joined>"`, so with no args it is the **unquoted** exe path plus a trailing space. The legacy data was the quoted path.
   - Windows `is_enabled()` only checks that the `Run` value exists (in HKLM or HKCU) and is not disabled in `StartupApproved\Run`; it never compares the data. A legacy entry therefore shows checked and no data rewrite is written.
   - Windows `enable()` also writes the "enabled" bytes to `StartupApproved\Run` when that key exists. That only happens when the user ticks the item, which is the user re-enabling; our own code never touches `StartupApproved`, and `is_enabled()` honours a Task Manager disable.
-  - The plugin Builder does not expose the Windows enable mode, so `auto-launch`'s default `Dynamic` applies: `enable()` tries HKLM first and falls back to HKCU on access denied. Only an elevated process writes HKLM. `disable()` removes both.
+  - The plugin Builder does not expose the Windows enable mode, so the plugin would use `auto-launch`'s default `Dynamic`: `enable()` tries HKLM first, so an elevated tick writes an all-users entry that a normal untick cannot remove (`disable()` ignores the HKLM access-denied error and `is_enabled()` still finds it), and that entry holds the unquoted path. Windows therefore does not register the plugin: `platform::windows::autostart_entry` builds an `auto_launch::AutoLaunch` with `WindowsEnableMode::CurrentUser` and the quoted exe path. Its data is `"<exe>" ` (the legacy quoted path plus the trailing space `auto-launch` always appends); `is_enabled()` is unchanged (value present in HKLM or HKCU, not disabled in `StartupApproved\Run`), so a legacy entry still shows checked. Linux and macOS keep the plugin (D10).
   - Linux `enable()` writes `~/.config/autostart/ClaudeCodeUsageBubble.desktop`, and the plugin uses `$APPIMAGE` (Tauri's `env().appimage`) as the path when it is set, so no entry of our own is needed. The `Exec` path is not quoted.
-- `menu::refresh` is `Runtime::refresh_shell(force)`: it snapshots state, then on the main thread syncs the trays and, when the menu tree differs from the last one applied (or after any menu click), gives every tray a freshly built menu. Countdown ticks and polls therefore rebuild no menu unless something in it changed.
+- `menu::refresh` is `Runtime::refresh_shell(force)`: on the main thread it snapshots state (lock released before any Tauri call), then syncs the trays and, when the menu tree differs from the last one applied (or after any menu click), gives every tray a freshly built menu. Countdown ticks and polls therefore rebuild no menu unless something in it changed. The snapshot is taken inside the main-thread closure because a closure queued from a worker runs after one a menu click runs inline; a snapshot taken on the calling thread could otherwise re-apply a stale tree and recreate a removed tray icon.
 - Each tray gets its own `Menu` instance; the bubble right-click builds a fresh one and pops it from the main thread after the async command returns.
-- The bubble windows are still the decorated JSON stand-ins; one is created per enabled provider. A window destroyed by a provider toggle is recreated from its `Destroyed` event if the provider is enabled again, except while the process is exiting. Widget show/hide uses Tauri `show`/`hide` until the no-activation path exists. Reset position and size changes update and save the settings and push new payloads; moving and resizing windows arrives with the bubble window.
+- The bubble windows are still the decorated JSON stand-ins; one is created per enabled provider. A window destroyed by a provider toggle is recreated from its `Destroyed` event if the provider is enabled again, except while the process is exiting. Outside `setup()`, bubbles are built on a short-lived thread (Tauri documents that building a webview window inside a menu or window event handler deadlocks on Windows); a process-wide lock, never taken by the main thread, serialises the toggle and the recreate path so only one builds the window. Widget show/hide uses Tauri `show`/`hide` until the no-activation path exists. Reset position and size changes update and save the settings and push new payloads; moving and resizing windows arrives with the bubble window.
 - The version item calls the update-check hook, which still only logs until the updater exists.
 - The stand-in page forwards `contextmenu` to `show_context_menu` so the menu can be checked before the real bubble UI.
 - The Windows toast spike could not run here. The AUMID registration and the notification wiring are implemented; the toast check stays a manual Windows check on the CI artifact, and if no toast appears the alerts need the user's decision before more work.
@@ -101,6 +101,8 @@ for the alerts (D9).
 - Windows (CI artifact, manual):
   - Left-click toggles; right-click shows the native menu; the tooltip has 4 lines.
   - Re-click the checked frequency, re-click the checked auto-update interval, and uncheck the only enabled provider: the check marks still match state afterwards.
+  - Toggle a provider off and on from the tray menu, once slowly and once quickly: the app does not hang, and exactly one bubble and one tray icon come back.
+  - Tick "Start with Windows" from an elevated run: only `HKCU\…\Run` gets the value, with the quoted path; a normal run can untick it.
   - The bubble right-click menu dismisses on a click elsewhere.
   - With a legacy `ClaudeCodeUsageBubble` Run value preset, the item shows checked, and there is exactly one entry after two launches. After a Task Manager disable, the item stays unchecked across two launches.
   - Threshold, session-expired and update-applied toasts appear from a fresh portable exe with no shortcut.

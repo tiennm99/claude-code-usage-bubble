@@ -102,11 +102,11 @@ non-live entry.
 
 | # | Phase | Effort | Depends on | Status |
 |---|-------|--------|------------|--------|
-| 01 | [Scaffold Tauri crate, JS toolchain and CI](phase-01-scaffold-tauri-and-toolchain.md) | 5h | none | pending |
-| 02 | [Extract portable core with tests](phase-02-portable-core.md) | 6h | 01 | pending |
-| 03 | [Data layer on ureq](phase-03-data-layer-ureq.md) | 4h | 02 | pending |
-| 04 | [App runtime: state, scheduler, CLI, single instance](phase-04-app-runtime.md) | 5h | 03 | pending |
-| 05 | [Menu, tray, alerts, autostart](phase-05-menu-tray-notify-autostart.md) | 6h | 04 | pending |
+| 01 | [Scaffold Tauri crate, JS toolchain and CI](phase-01-scaffold-tauri-and-toolchain.md) | 5h | none | completed |
+| 02 | [Extract portable core with tests](phase-02-portable-core.md) | 6h | 01 | completed |
+| 03 | [Data layer on ureq](phase-03-data-layer-ureq.md) | 4h | 02 | completed |
+| 04 | [App runtime: state, scheduler, CLI, single instance](phase-04-app-runtime.md) | 5h | 03 | completed |
+| 05 | [Menu, tray, alerts, autostart](phase-05-menu-tray-notify-autostart.md) | 6h | 04 | in-progress |
 | 06 | [Bubble window and UI](phase-06-bubble-window-ui.md) | 9h | 05 | pending |
 | 07 | [Details panel window](phase-07-panel-window.md) | 3h | 06 | pending |
 | 08 | [Fullscreen auto-hide](phase-08-fullscreen-auto-hide.md) | 2h | 06 | pending |
