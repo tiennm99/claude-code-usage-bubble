@@ -254,8 +254,10 @@ pub fn round_corners(window: &tauri::WebviewWindow) -> io::Result<()> {
 
 /// Turn off WebView2's browser accelerator keys (F5, Ctrl+R, Ctrl+P,
 /// Ctrl+F, zoom, F12 and the like) for `window`'s webview, then reload it,
-/// because the setting applies from the next navigation. Runs on the main
-/// thread; a failure inside the webview is logged there.
+/// because the setting applies from the next navigation. Call it only after
+/// the first navigation has finished, or the reload can replace that
+/// navigation. The work runs on the main thread; a failure inside the
+/// webview is logged there.
 pub fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) -> io::Result<()> {
     let label = window.label().to_string();
     window

@@ -130,7 +130,7 @@ fn background(is_dark: bool) -> Color {
 
 /// Create the hidden panel window. Called once at startup.
 pub fn create(app: &AppHandle, is_dark: bool) -> tauri::Result<()> {
-    let window = WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("panel.html".into()))
+    let builder = WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("panel.html".into()))
         .title(TITLE)
         .decorations(false)
         .always_on_top(true)
@@ -140,24 +140,52 @@ pub fn create(app: &AppHandle, is_dark: bool) -> tauri::Result<()> {
         .shadow(false)
         .visible(false)
         .background_color(background(is_dark))
-        .inner_size(f64::from(PANEL_W_LOGICAL), f64::from(PANEL_H_LOGICAL))
-        .build()?;
+        .inner_size(f64::from(PANEL_W_LOGICAL), f64::from(PANEL_H_LOGICAL));
+    #[cfg(windows)]
+    let builder = builder.on_page_load(disable_browser_keys_after_first_load());
+    let window = builder.build()?;
     prepare_native(app, &window);
     log::info!("{PANEL_LABEL} created");
     Ok(())
 }
 
-/// Windows: drop the panel from Alt-Tab and turn off the browser keys of
-/// its webview, on the window's own (main) thread, before the first show.
+/// Windows: a page-load hook that turns off the webview's browser keys
+/// once `panel.html` has finished its first load. The setting only applies
+/// from the next navigation, so it comes with a reload; waiting for the
+/// first load keeps that reload from racing the initial navigation, and the
+/// flag keeps the reload's own load from repeating it. The work leaves the
+/// navigation callback through another thread, which queues it on the main
+/// thread for after the callback returns.
+#[cfg(windows)]
+fn disable_browser_keys_after_first_load(
+) -> impl Fn(WebviewWindow, tauri::webview::PageLoadPayload<'_>) + Send + Sync + 'static {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tauri::webview::PageLoadEvent;
+
+    let done = AtomicBool::new(false);
+    move |window, payload| {
+        if payload.event() != PageLoadEvent::Finished
+            || payload.url().scheme() == "about"
+            || done.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        std::thread::spawn(move || {
+            if let Err(err) = platform::windows::disable_browser_accelerator_keys(&window) {
+                log::warn!("{PANEL_LABEL} keeps the browser accelerator keys: {err}");
+            }
+        });
+    }
+}
+
+/// Windows: drop the panel from Alt-Tab, on the window's own (main)
+/// thread, before the first show.
 #[cfg(windows)]
 fn prepare_native(app: &AppHandle, window: &WebviewWindow) {
     let window = window.clone();
     let queued = app.run_on_main_thread(move || {
         if let Err(err) = platform::windows::apply_toolwindow(&window) {
             log::warn!("{PANEL_LABEL} may show in Alt-Tab: {err}");
-        }
-        if let Err(err) = platform::windows::disable_browser_accelerator_keys(&window) {
-            log::warn!("{PANEL_LABEL} keeps the browser accelerator keys: {err}");
         }
     });
     if let Err(err) = queued {

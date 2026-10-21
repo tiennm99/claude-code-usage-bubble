@@ -92,7 +92,7 @@ dismisses it.
 
 - The row labels ("5h", "7d") are not in `PanelPayload`; the page reads them once from the existing `get_strings` command, so the payload contract stays as planned.
 - The pure page helpers live in `ui/panel-view.js` instead of `ui/panel.js`, because `panel.js` reads `window.__TAURI__` on import and cannot run under `node --test`.
-- Tauri does not expose wry's `with_browser_accelerator_keys`, so `platform::windows::disable_browser_accelerator_keys` sets `AreBrowserAcceleratorKeysEnabled` through `with_webview` and reloads the page once at startup, because the setting applies from the next navigation. The `keydown` handler covers the same keys on every platform.
+- Tauri does not expose wry's `with_browser_accelerator_keys`, so `platform::windows::disable_browser_accelerator_keys` sets `AreBrowserAcceleratorKeysEnabled` through `with_webview` and reloads the page once, because the setting applies from the next navigation. A page-load hook on the panel runs this after the first `panel.html` load finishes, so the reload cannot replace the initial navigation; still to check on Windows hardware that the panel draws its payload after startup. The `keydown` handler covers the same keys on every platform.
 - `bubble_click` is an async command, so the toggle is queued to the main thread instead of running inside the webview's IPC callback. Toggles and refreshes both run on the main thread, which keeps a refresh from drawing a provider the panel no longer shows.
 - The panel background colour is set from the theme before every show, and the payload is emitted before `show()`, against a white or stale flash.
 - `shadow(false)` is kept until the Windows screenshot comparison says otherwise.
