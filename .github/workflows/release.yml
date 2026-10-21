@@ -1,73 +1,244 @@
 name: Release
 
+# A pushed tag publishes the release that every client updates from: legacy
+# Win32 clients (v0.5.0 and earlier) through the GitHub API's
+# `/releases/latest`, Tauri clients through its `latest.json` asset. A
+# dispatch run builds the same assets into a draft, which neither reaches.
+
 on:
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (must already exist, e.g. v0.1.1)'
+        description: 'Existing tag to build into a draft release (e.g. v0.0.0-test)'
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
+  prepare:
+    name: Check the tag and the updater key
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Resolve tag
-        id: tag
-        shell: pwsh
-        run: |
-          $tag = if ($env:GITHUB_REF -like 'refs/tags/*') {
-            $env:GITHUB_REF -replace '^refs/tags/',''
-          } else {
-            '${{ github.event.inputs.tag }}'
-          }
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Verify Cargo.toml version matches tag
-        shell: pwsh
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          $tag = '${{ steps.tag.outputs.tag }}'
-          $expected = $tag -replace '^v',''
-          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          if ($cargoVersion -ne $expected) {
-            Write-Error "Tag ($tag -> $expected) does not match Cargo.toml version ($cargoVersion). Bump Cargo.toml before tagging."
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="$INPUT_TAG"
+          fi
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$tag' is not of the form vX.Y.Z or vX.Y.Z-suffix."
             exit 1
-          }
-          Write-Host "Cargo version $cargoVersion matches tag $tag"
+          fi
+          expected="${tag#v}"
+          cargo_version=$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n 1)
+          if [ "$cargo_version" != "$expected" ]; then
+            echo "::error::Tag ($tag -> $expected) does not match Cargo.toml version ($cargo_version). Bump Cargo.toml before tagging."
+            exit 1
+          fi
+          echo "Cargo version $cargo_version matches tag $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$expected" >> "$GITHUB_OUTPUT"
 
       # An exe without the updater public key can never verify, and so never
       # install, a later update; every install of it would be stranded.
+      # build.rs checks this only for a build that has the signing key in its
+      # environment, so check it here, before any build runs.
       - name: Refuse an empty updater public key
-        shell: pwsh
         run: |
-          $pubkey = (Get-Content tauri.conf.json -Raw | ConvertFrom-Json).plugins.updater.pubkey
-          if ([string]::IsNullOrWhiteSpace($pubkey)) {
-            Write-Error "plugins.updater.pubkey in tauri.conf.json is empty: put the updater public key there before releasing."
+          pubkey=$(jq -r '.plugins.updater.pubkey // ""' tauri.conf.json)
+          if [ -z "${pubkey//[[:space:]]/}" ]; then
+            echo "::error::plugins.updater.pubkey in tauri.conf.json is empty: put the updater public key there before releasing."
             exit 1
-          }
+          fi
 
-      - name: Build release
-        run: cargo build --release --locked
-
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
+  win-x64:
+    name: Windows x64
+    needs: prepare
+    runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Refuse a missing signing key
+        shell: bash
         run: |
-          $tag = '${{ steps.tag.outputs.tag }}'
-          $asset = 'target/release/claude-code-usage-bubble.exe'
-          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
-            gh release create $tag $asset --title $tag --generate-notes --draft
-          } else {
-            gh release create $tag $asset --title $tag --generate-notes
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY//[[:space:]]/}" ]; then
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is empty; an unsigned build cannot be released."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - run: npm ci
+
+      # The Windows release is the portable exe; no installer is built.
+      - run: npm run tauri build -- --no-bundle -- --locked
+
+      # `signer sign` writes a separate .sig and leaves the exe bytes as
+      # built, so the digest GitHub reports for the uploaded exe, which
+      # legacy clients verify, is the digest of the file they run.
+      - name: Sign the exe
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          exe=target/release/claude-code-usage-bubble.exe
+          npx tauri signer sign --app-version "$VERSION" "$exe"
+          test -s "$exe.sig"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-win-x64
+          path: |
+            target/release/claude-code-usage-bubble.exe
+            target/release/claude-code-usage-bubble.exe.sig
+          retention-days: 7
+          if-no-files-found: error
+
+  linux-x64:
+    name: Linux x64
+    needs: prepare
+    runs-on: ubuntu-22.04
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Refuse a missing signing key
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY//[[:space:]]/}" ]; then
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is empty; an unsigned build cannot be released."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Linux build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - run: npm ci
+
+      - name: Build the AppImage and deb with updater signatures
+        run: >-
+          npm run tauri build --
+          --bundles appimage,deb
+          --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          -- --locked
+
+      # The bundler names outputs after productName, which has spaces, and
+      # GitHub rewrites spaces in asset names, so the URLs in latest.json
+      # would no longer match. A signature covers the content, not the name.
+      - name: Rename the bundles to space-free names
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          one() {
+            if [ "$#" -ne 1 ]; then
+              echo "::error::Expected exactly one bundle, found $#: $*" >&2
+              return 1
+            fi
+            printf '%s' "$1"
           }
+          appimage=$(one target/release/bundle/appimage/*_amd64.AppImage)
+          deb=$(one target/release/bundle/deb/*_amd64.deb)
+          name="claude-code-usage-bubble_${VERSION}_amd64"
+          mkdir -p dist
+          cp "$appimage" "dist/$name.AppImage"
+          cp "$appimage.sig" "dist/$name.AppImage.sig"
+          cp "$deb" "dist/$name.deb"
+          test -s "dist/$name.AppImage.sig"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-x64
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: [prepare, win-x64, linux-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Write latest.json and check the asset set
+        run: node scripts/make-latest-json.js "$TAG" dist
+
+      # Legacy clients read only `/releases/latest`, so a tag release must be
+      # a non-draft, non-prerelease release marked latest.
+      - name: Create the release
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            mode=(--draft)
+          else
+            mode=(--latest)
+          fi
+          gh release create "$TAG" dist/* --verify-tag --title "$TAG" --generate-notes "${mode[@]}"
+
+      - name: Check that /releases/latest is this release
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .tag_name)
+          if [ "$latest" != "$TAG" ]; then
+            echo "::error::/releases/latest returns $latest, not $TAG; legacy clients would not see this release."
+            exit 1
+          fi
