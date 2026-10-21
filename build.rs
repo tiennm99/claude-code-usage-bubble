@@ -8,12 +8,17 @@
 // reads after the config file. Any `TAURI_CONFIG` passed by the CLI
 // (`--config`) is kept.
 //
+// A build that has the updater signing key in its environment is a release
+// build, so it must also carry the matching public key: without one, the
+// installed app could never verify, and so never install, a later update.
+//
 // The manifest keeps tauri's default Common-Controls v6 dependency and adds
 // PerMonitorV2 DPI awareness, so the process is DPI aware before any window
 // exists instead of relying on a runtime call.
 
 fn main() {
     inject_cargo_version();
+    require_updater_pubkey_when_signing();
 
     let windows = tauri_build::WindowsAttributes::new()
         .app_manifest(include_str!("res/windows-app-manifest.xml"));
@@ -34,4 +39,31 @@ fn inject_cargo_version() {
         .entry("version")
         .or_insert_with(|| env!("CARGO_PKG_VERSION").into());
     std::env::set_var("TAURI_CONFIG", config.to_string());
+}
+
+fn require_updater_pubkey_when_signing() {
+    println!("cargo:rerun-if-env-changed=TAURI_SIGNING_PRIVATE_KEY");
+    let signing = std::env::var("TAURI_SIGNING_PRIVATE_KEY").is_ok_and(|v| !v.trim().is_empty());
+    if !signing {
+        return;
+    }
+    let raw = std::fs::read_to_string("tauri.conf.json").expect("tauri.conf.json must be readable");
+    let file: serde_json::Value =
+        serde_json::from_str(&raw).expect("tauri.conf.json must be valid JSON");
+    // `--config` overrides arrive through TAURI_CONFIG and win over the file.
+    let overrides: serde_json::Value = std::env::var("TAURI_CONFIG")
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    const PUBKEY: &str = "/plugins/updater/pubkey";
+    let pubkey = overrides
+        .pointer(PUBKEY)
+        .or_else(|| file.pointer(PUBKEY))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        !pubkey.trim().is_empty(),
+        "plugins.updater.pubkey in tauri.conf.json is empty, but TAURI_SIGNING_PRIVATE_KEY is set: \
+         put the public key of that signing key there before building a release"
+    );
 }
