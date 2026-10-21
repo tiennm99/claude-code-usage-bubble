@@ -1,0 +1,19 @@
+{
+  "name": "claude-code-usage-bubble",
+  "private": true,
+  "description": "Floating bubble showing Claude Code and Codex usage",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "lint": "eslint .",
+    "test": "node --test \"tests/js/**/*.test.js\""
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tauri-apps/cli": "^2.12.3",
+    "eslint": "^10.13.0",
+    "eslint-plugin-jsdoc": "^65.4.0",
+    "globals": "^17.13.0"
+  }
+}
