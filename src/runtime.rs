@@ -591,11 +591,7 @@ impl Runtime {
 
     /// Blocking body of [`Self::check_for_updates`].
     fn run_update_check(&self) {
-        let proxy = if net::env_proxy().is_some() {
-            None
-        } else {
-            update::proxy_url(self.http.system_proxy())
-        };
+        let proxy = update::proxy_url(net::env_proxy().as_ref(), self.http.system_proxy());
         let outcome = update::check(&self.ui.app, proxy);
         let now_unix = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)

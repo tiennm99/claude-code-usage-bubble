@@ -334,7 +334,7 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
-    use super::test_server::serve_once;
+    use super::test_server::{serve_once, serve_socks5_once};
     use super::*;
 
     fn direct_client() -> Client {
@@ -496,75 +496,6 @@ mod tests {
         move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
     }
 
-    /// A one-shot SOCKS5 proxy that accepts the handshake, reports the CONNECT
-    /// target it was asked for, then answers the tunnelled request itself with
-    /// `200 OK` and `body`.
-    fn serve_socks5_once(body: &'static [u8]) -> (u16, std::sync::mpsc::Receiver<String>) {
-        use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let port = listener.local_addr().expect("local addr").port();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            // A broken handshake must fail the test, not hang it.
-            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-            let byte = |stream: &mut std::net::TcpStream, n: usize| {
-                let mut buf = vec![0u8; n];
-                stream.read_exact(&mut buf).map(|_| buf)
-            };
-            // Greeting: version 5, then the offered auth methods.
-            let Ok(head) = byte(&mut stream, 2) else {
-                return;
-            };
-            let _ = byte(&mut stream, usize::from(head[1]));
-            if stream.write_all(&[5, 0]).is_err() {
-                return;
-            }
-            // Request: version, CONNECT, reserved, address type.
-            let Ok(req) = byte(&mut stream, 4) else {
-                return;
-            };
-            let target = match req[3] {
-                3 => {
-                    let len = byte(&mut stream, 1).map(|b| usize::from(b[0])).unwrap_or(0);
-                    String::from_utf8_lossy(&byte(&mut stream, len).unwrap_or_default())
-                        .into_owned()
-                }
-                1 => byte(&mut stream, 4)
-                    .map(|a| std::net::Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string())
-                    .unwrap_or_default(),
-                other => format!("address type {other}"),
-            };
-            let port = byte(&mut stream, 2)
-                .map(|p| u16::from_be_bytes([p[0], p[1]]))
-                .unwrap_or(0);
-            let _ = stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
-            // Read the tunnelled request head, then answer it.
-            let mut seen = Vec::new();
-            let mut buf = [0u8; 1024];
-            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
-                match stream.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => seen.extend_from_slice(&buf[..n]),
-                }
-            }
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = stream.write_all(reply.as_bytes());
-            let _ = stream.write_all(body);
-            let _ = tx.send(format!(
-                "{} {target}:{port}\n{}",
-                req[0],
-                String::from_utf8_lossy(&seen)
-            ));
-        });
-        (port, rx)
-    }
-
     #[test]
     fn socks5h_env_proxy_tunnels_with_remote_resolution() {
         let (socks_port, seen) = serve_socks5_once(b"via socks");
@@ -707,5 +638,73 @@ pub(crate) mod test_server {
             base: format!("http://127.0.0.1:{port}"),
             request: rx,
         }
+    }
+
+    /// A one-shot SOCKS5 proxy that accepts the handshake, reports the CONNECT
+    /// target it was asked for, then answers the tunnelled request itself with
+    /// `200 OK` and `body`.
+    pub fn serve_socks5_once(body: &'static [u8]) -> (u16, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // A broken handshake must fail the test, not hang it.
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let byte = |stream: &mut std::net::TcpStream, n: usize| {
+                let mut buf = vec![0u8; n];
+                stream.read_exact(&mut buf).map(|_| buf)
+            };
+            // Greeting: version 5, then the offered auth methods.
+            let Ok(head) = byte(&mut stream, 2) else {
+                return;
+            };
+            let _ = byte(&mut stream, usize::from(head[1]));
+            if stream.write_all(&[5, 0]).is_err() {
+                return;
+            }
+            // Request: version, CONNECT, reserved, address type.
+            let Ok(req) = byte(&mut stream, 4) else {
+                return;
+            };
+            let target = match req[3] {
+                3 => {
+                    let len = byte(&mut stream, 1).map(|b| usize::from(b[0])).unwrap_or(0);
+                    String::from_utf8_lossy(&byte(&mut stream, len).unwrap_or_default())
+                        .into_owned()
+                }
+                1 => byte(&mut stream, 4)
+                    .map(|a| std::net::Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string())
+                    .unwrap_or_default(),
+                other => format!("address type {other}"),
+            };
+            let port = byte(&mut stream, 2)
+                .map(|p| u16::from_be_bytes([p[0], p[1]]))
+                .unwrap_or(0);
+            let _ = stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+            // Read the tunnelled request head, then answer it.
+            let mut seen = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+            let _ = stream.write_all(body);
+            let _ = tx.send(format!(
+                "{} {target}:{port}\n{}",
+                req[0],
+                String::from_utf8_lossy(&seen)
+            ));
+        });
+        (port, rx)
     }
 }

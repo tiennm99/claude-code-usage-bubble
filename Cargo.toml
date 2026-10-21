@@ -31,6 +31,10 @@ tiny-skia = "0.11"
 self-replace = "1.5"
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
+# Not used directly: Cargo's feature unification turns `socks` on for the
+# updater plugin's reqwest, so update requests can use a SOCKS env proxy.
+# Keep the major in step with the plugin's (`cargo tree -i reqwest`).
+reqwest = { version = "0.13", default-features = false, features = ["socks"] }
 
 [target.'cfg(not(windows))'.dependencies]
 tauri-plugin-autostart = "2"
@@ -66,6 +70,9 @@ auto-launch = "0.6"
 
 [dev-dependencies]
 flate2 = "1"
+# The crypto provider the updater plugin installs before its reqwest client
+# is built; the SOCKS update test builds such a client itself.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

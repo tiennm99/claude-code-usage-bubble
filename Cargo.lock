@@ -524,6 +524,8 @@ dependencies = [
  "libc",
  "libloading 0.9.0",
  "log",
+ "reqwest",
+ "rustls",
  "self-replace",
  "serde",
  "serde_json",

@@ -164,11 +164,67 @@ pub fn apply(mut update: Update, channel: Channel) -> Result<Version, Error> {
     Ok(Version::parse(&update.version))
 }
 
-/// The proxy for the update requests: the system proxy, unless an update
-/// host bypasses it. Pass `None` when an environment proxy is set, which the
-/// plugin reads itself.
-pub fn proxy_url(system: Option<&crate::core::proxy::SystemProxy>) -> Option<Url> {
-    let system = system?;
+/// The proxy for the update requests, passed to the plugin explicitly so it
+/// matches the one the usage requests use.
+///
+/// An environment proxy (`net::env_proxy`, SOCKS included) wins over the
+/// system proxy. `None`, when an update host is on the `NO_PROXY` or system
+/// bypass list or no proxy is set, leaves the plugin to its own discovery,
+/// which honours those lists per host.
+pub fn proxy_url(
+    env: Option<&ureq::Proxy>,
+    system: Option<&crate::core::proxy::SystemProxy>,
+) -> Option<Url> {
+    match env {
+        Some(env) => env_proxy_url(env),
+        None => system_proxy_url(system?),
+    }
+}
+
+fn env_proxy_url(proxy: &ureq::Proxy) -> Option<Url> {
+    use ureq::ProxyProtocol as P;
+    let bypassed = UPDATE_HOSTS.iter().any(|host| {
+        format!("https://{host}/")
+            .parse::<ureq::http::Uri>()
+            .is_ok_and(|uri| proxy.is_no_proxy(&uri))
+    });
+    if bypassed {
+        return None;
+    }
+    let scheme = match proxy.protocol() {
+        P::Http => "http",
+        P::Https => "https",
+        P::Socks4 => "socks4",
+        P::Socks4A => "socks4a",
+        P::Socks5 => "socks5",
+        P::Socks5h => "socks5h",
+        _ => {
+            log::warn!("environment proxy ignored for updates, unsupported protocol");
+            return None;
+        }
+    };
+    // The credentials stay percent-encoded, as they were in the variable.
+    let userinfo = match (proxy.username(), proxy.password()) {
+        (Some(user), Some(password)) => format!("{user}:{password}@"),
+        (Some(user), None) => format!("{user}@"),
+        _ => String::new(),
+    };
+    let built = Url::parse(&format!(
+        "{scheme}://{userinfo}{}:{}",
+        proxy.host(),
+        proxy.port()
+    ));
+    match built {
+        Ok(url) => Some(url),
+        Err(err) => {
+            // The proxy URL is not logged: it may carry credentials.
+            log::warn!("environment proxy ignored for updates, not a valid URL: {err}");
+            None
+        }
+    }
+}
+
+fn system_proxy_url(system: &crate::core::proxy::SystemProxy) -> Option<Url> {
     if UPDATE_HOSTS.iter().any(|host| system.bypasses(host)) {
         return None;
     }
@@ -271,14 +327,109 @@ mod tests {
 
     #[test]
     fn update_proxy_honours_the_bypass_list() {
-        assert_eq!(proxy_url(None), None);
+        assert_eq!(proxy_url(None, None), None);
         assert_eq!(
-            proxy_url(Some(&proxy(&[]))).map(|u| u.to_string()),
+            proxy_url(None, Some(&proxy(&[]))).map(|u| u.to_string()),
             Some("http://proxy.corp:8080/".into())
         );
-        assert!(proxy_url(Some(&proxy(&["*.example.com"]))).is_some());
-        assert_eq!(proxy_url(Some(&proxy(&["github.com"]))), None);
-        assert_eq!(proxy_url(Some(&proxy(&["*.githubusercontent.com"]))), None);
+        assert!(proxy_url(None, Some(&proxy(&["*.example.com"]))).is_some());
+        assert_eq!(proxy_url(None, Some(&proxy(&["github.com"]))), None);
+        assert_eq!(
+            proxy_url(None, Some(&proxy(&["*.githubusercontent.com"]))),
+            None
+        );
+    }
+
+    fn env(uri: &str) -> ureq::Proxy {
+        ureq::Proxy::new(uri).expect("valid proxy")
+    }
+
+    #[test]
+    fn update_proxy_passes_the_env_proxy_whatever_its_scheme() {
+        let url = |env_uri: &str| proxy_url(Some(&env(env_uri)), None).map(|u| u.to_string());
+        assert_eq!(
+            url("http://proxy.corp:3128"),
+            Some("http://proxy.corp:3128/".into())
+        );
+        assert_eq!(
+            url("socks5h://127.0.0.1:7890"),
+            Some("socks5h://127.0.0.1:7890".into())
+        );
+        assert_eq!(url("socks5://[::1]"), Some("socks5://[::1]:1080".into()));
+        assert_eq!(
+            url("socks4a://10.0.0.1:1081"),
+            Some("socks4a://10.0.0.1:1081".into())
+        );
+        assert_eq!(
+            url("socks5h://us%40r:p%3Ass@127.0.0.1:7890"),
+            Some("socks5h://us%40r:p%3Ass@127.0.0.1:7890".into())
+        );
+    }
+
+    #[test]
+    fn update_proxy_prefers_the_env_proxy_over_the_system_proxy() {
+        assert_eq!(
+            proxy_url(Some(&env("socks5h://127.0.0.1:7890")), Some(&proxy(&[])))
+                .map(|u| u.to_string()),
+            Some("socks5h://127.0.0.1:7890".into())
+        );
+        assert_eq!(
+            proxy_url(Some(&env("http://proxy.env:3128")), Some(&proxy(&[])))
+                .map(|u| u.to_string()),
+            Some("http://proxy.env:3128/".into())
+        );
+    }
+
+    #[test]
+    fn update_proxy_leaves_no_proxy_hosts_to_the_plugin() {
+        let with_no_proxy = |expr: &str| {
+            ureq::Proxy::builder(ureq::ProxyProtocol::Socks5h)
+                .host("127.0.0.1")
+                .port(7890)
+                .no_proxy(expr)
+                .build()
+                .expect("valid proxy")
+        };
+        assert_eq!(proxy_url(Some(&with_no_proxy("github.com")), None), None);
+        assert_eq!(
+            proxy_url(Some(&with_no_proxy(".githubusercontent.com")), None),
+            None
+        );
+        assert!(proxy_url(Some(&with_no_proxy("example.com")), None).is_some());
+    }
+
+    #[test]
+    fn updater_client_reaches_the_network_through_a_socks_env_proxy() {
+        // Guards the `socks` feature the direct reqwest dependency turns on
+        // for the plugin: without it reqwest rejects the SOCKS proxy.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (socks_port, seen) = crate::net::test_server::serve_socks5_once(b"via socks");
+        let url = proxy_url(
+            Some(&env(&format!("socks5h://127.0.0.1:{socks_port}"))),
+            None,
+        )
+        .expect("socks proxy url");
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(url.as_str()).expect("reqwest proxy"))
+            .build()
+            .expect("reqwest client");
+        let body = tauri::async_runtime::block_on(async {
+            client
+                .get("http://example.invalid:8080/latest.json")
+                .send()
+                .await?
+                .text()
+                .await
+        })
+        .expect("request through socks");
+        assert_eq!(body, "via socks");
+        let request = seen
+            .recv_timeout(Duration::from_secs(10))
+            .expect("socks proxy saw the request");
+        assert!(
+            request.starts_with("5 example.invalid:8080\nGET /latest.json HTTP/1.1\r\n"),
+            "{request}"
+        );
     }
 
     #[test]
