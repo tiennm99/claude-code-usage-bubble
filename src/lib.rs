@@ -10,6 +10,7 @@ pub mod diag;
 pub mod handoff;
 pub mod net;
 pub mod platform;
+pub mod scheduler;
 pub mod usage;
 
 use tauri::{RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
