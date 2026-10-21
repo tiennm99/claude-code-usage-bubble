@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Extract portable core with tests"
-status: pending
+status: completed
 priority: P1
 effort: "6h"
 dependencies: [1]
@@ -56,6 +56,50 @@ Move or port each item below, keeping its exact behaviour and constants.
    - The update schedule's due and remaining values. Settings JSON for the legacy two-provider and three-provider files and for a corrupt file. Probe validation against fake monitors.
    - The menu model's greyed sizes at 140, 360 and 200.
    - Payloads: `sessionPctText` `'—'` for `None`, `weeklyPctText` `null` for `None`, `'…'` placeholders before the first poll, stale countdowns (not `'!'`) in the bubble after an auth failure, and `'!'`/`'…'` in the panel texts.
+
+## Todo
+
+- [x] `core/geom.rs`: `Rect`, `Point`, `scale`, bubble sizing, `default_position`, `clamp_into_work_area`, `snap` over `SnapInput`, `point_in_rounded_rect`, `place_near`, `position_on_any_monitor`, `rect_covers_monitor`, `window_style_bits_allow_fullscreen`
+- [x] `core/settings.rs`: `parse_and_normalise`, `drop_offscreen_positions`, same path, serde attributes, atomic save and toggle invariant
+- [x] `core/i18n.rs`: `start_at_login` selected by `cfg(windows)`, `format_pct`, `format_window`, `format_countdown`, `time_until_display_change`
+- [x] `core/color.rs` and `core/usage_color.rs`: `Rgb::to_hex`, `accent_color_for`, `bar_fill_color`, `brighten`, `pulse_triangle`
+- [x] `core/state.rs`: `apply_results`, 30-minute cooldown, `tray_tooltip`, `UpdateStatus`, `version_action_label`, update-check due/remaining
+- [x] `core/payload.rs`: `BubblePayload` and `PanelPayload` builders
+- [x] `core/menu_model.rs`: menu tree with string ids, check/enabled flags and hint rows
+- [x] `src/lib.rs` declares `core` and `usage`; `usage/mod.rs` reduced to `types`; `ProviderId` derives `Serialize`
+- [x] Deleted `src/settings.rs`, `src/i18n/mod.rs`, `src/usage_color.rs`, `src/os/color.rs`, `src/os/dpi.rs`
+- [x] Host: `cargo test core::` (65 tests), `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle`
+
+## Implementation notes
+
+- `apply_results` takes `core::state::PollOutcome` (`Ok`, `AuthFailed`,
+  `Failed`) instead of `usage::Error`, because the error type needs `net` and
+  `creds`, which return in Phase 03. The caller maps `AuthRequired` and
+  `TokenExpired` to `AuthFailed`, everything else to `Failed`, and logs the
+  transient error as before.
+- The cooldown lives in `UsageState::admit_alert`. Threshold alerts pass it
+  inside `apply_results`; `session_expired_alert` uses the same gate; the
+  update-applied alert does not (parity).
+- Time-dependent helpers have `_at(…, now)` variants so the countdown and
+  payload tests are deterministic. `bubble_payload` takes `now` as well as
+  the `Canvas { w, h, dpi }`.
+- `version_action_label` drops the old WinGet suffix: no WinGet package
+  exists and Phase 09 replaces the channel enum.
+- `drop_offscreen_positions` keeps every position when the monitor list is
+  empty, so a failed `available_monitors()` cannot wipe them. The probe
+  needs real overlap with a monitor rect, like `MonitorFromRect` with
+  `MONITOR_DEFAULTTONULL`.
+- `Settings::save` now returns `io::Result` so the caller can log a failure;
+  the tmp-and-rename write and its direct-write fallback are unchanged.
+- `Settings::toggle_live_provider` holds the toggle invariant from
+  `toggle_model`: providers without live usage never change, and the last
+  enabled live provider is re-enabled.
+- `MenuCommand::parse` accepts only the poll and update intervals the menu
+  offers, so a malformed id cannot set an arbitrary interval.
+- The old `pulse_triangle` doc comment had the peaks wrong; the code is
+  unchanged and the comment now says 0 at phase 0 and 1 at phase 12.
+- `src/os/mod.rs` still names the deleted `color` and `dpi` files. It is
+  outside the module tree, and the phase that deletes `src/os/` removes it.
 
 ## Validation
 
