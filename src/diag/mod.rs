@@ -7,9 +7,13 @@
 use std::fs::File;
 use std::path::PathBuf;
 
-use simplelog::{Config, LevelFilter, WriteLogger};
+use simplelog::{CombinedLogger, ConfigBuilder, LevelFilter, WriteLogger};
 
 const LOG_FILE_NAME: &str = "claude-code-usage-bubble.log";
+
+/// The updater plugin logs the proxy URL, credentials included, at debug
+/// level, so its messages are kept to info and above.
+const UPDATER_TARGET: &str = "tauri_plugin_updater";
 
 /// Initialise file-based logging. Idempotent — second call is a no-op.
 ///
@@ -22,8 +26,18 @@ pub fn init(enabled: bool) -> std::io::Result<Option<PathBuf>> {
     }
     let path = std::env::temp_dir().join(LOG_FILE_NAME);
     let file = File::create(&path)?;
+    let updater_file = file.try_clone()?;
+    let app = ConfigBuilder::new()
+        .add_filter_ignore_str(UPDATER_TARGET)
+        .build();
+    let updater = ConfigBuilder::new()
+        .add_filter_allow_str(UPDATER_TARGET)
+        .build();
     // simplelog will refuse a second init; convert that into a soft no-op.
-    let _ = WriteLogger::init(LevelFilter::Debug, Config::default(), file);
+    let _ = CombinedLogger::init(vec![
+        WriteLogger::new(LevelFilter::Debug, app, file),
+        WriteLogger::new(LevelFilter::Info, updater, updater_file),
+    ]);
     log::info!("diagnostic logging enabled at {}", path.display());
     Ok(Some(path))
 }
