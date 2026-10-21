@@ -3,7 +3,7 @@ title: Port the usage bubble to Tauri v2
 description: >-
   Rebuild the Win32 bubble, panel, tray and updater on Tauri v2 with a plain
   HTML/CSS/SVG/JS UI, keeping Windows parity, running on Linux x86_64 and cfg-gating macOS.
-status: pending
+status: in-progress
 priority: P1
 effort: 51h
 branch: feat/tauri-port
@@ -23,8 +23,10 @@ The app runs on Tauri v2. Windows behaves the same as v0.5.0, and existing
 v0.4.0+ users self-update into the Tauri build without losing settings or
 autostart. Linux x86_64 builds and runs (X11 full, Wayland best-effort). macOS
 compiles behind cfg-gated stubs so it can be finished later. Linux ARM64, a macOS
-build, Wayland-native positioning and a rename are later work in the root
-`ROADMAP.md`, not part of this plan.
+build and Wayland-native positioning are later work in the root `ROADMAP.md`.
+The rename to `usage-monitor` follows in its own plan,
+[261021-1226-rename-to-usage-monitor](../261021-1226-rename-to-usage-monitor/plan.md).
+None of these is part of this plan.
 
 ## Stack (approved)
 
@@ -91,6 +93,8 @@ build, Wayland-native positioning and a rename are later work in the root
 9. Windows file properties now show the real version instead of the stale `0.1.0` (`res/icon.rc`).
 10. Fonts: Segoe UI stays first in the stack. Linux and macOS fall back to `system-ui`, so text metrics differ there.
 11. The app refuses to start without the WebView2 runtime and shows a message box with the download link instead (Phase 04).
+12. Windows autostart does not register `tauri-plugin-autostart`. It uses `auto-launch` directly in current-user mode with the quoted exe path, because the plugin's default mode writes an all-users entry when elevated that a normal untick cannot remove (Phase 05, refines D10).
+13. Applying an update downloads the `Update` the last check found, with its timeout set to 600 s, instead of building a second updater and checking again: the builder timeout never reaches `download()` (Phase 09, refines D8).
 
 Everything else in the subsystem maps is kept as-is. The quirks are kept too:
 the global `last_poll_ok`, the first-poll threshold alert, the unscaled 24 px
@@ -102,17 +106,17 @@ non-live entry.
 
 | # | Phase | Effort | Depends on | Status |
 |---|-------|--------|------------|--------|
-| 01 | [Scaffold Tauri crate, JS toolchain and CI](phase-01-scaffold-tauri-and-toolchain.md) | 5h | none | completed |
+| 01 | [Scaffold Tauri crate, JS toolchain and CI](phase-01-scaffold-tauri-and-toolchain.md) | 5h | none | in-progress: code done; awaits the Windows manual check |
 | 02 | [Extract portable core with tests](phase-02-portable-core.md) | 6h | 01 | completed |
 | 03 | [Data layer on ureq](phase-03-data-layer-ureq.md) | 4h | 02 | completed |
-| 04 | [App runtime: state, scheduler, CLI, single instance](phase-04-app-runtime.md) | 5h | 03 | completed |
-| 05 | [Menu, tray, alerts, autostart](phase-05-menu-tray-notify-autostart.md) | 6h | 04 | in-progress |
-| 06 | [Bubble window and UI](phase-06-bubble-window-ui.md) | 9h | 05 | pending |
-| 07 | [Details panel window](phase-07-panel-window.md) | 3h | 06 | pending |
-| 08 | [Fullscreen auto-hide](phase-08-fullscreen-auto-hide.md) | 2h | 06 | pending |
-| 09 | [Updater](phase-09-updater-migration.md) | 4h | 05 | pending |
-| 10 | [Release pipeline and legacy-client compatibility](phase-10-ci-release.md) | 4h | 09 | pending |
-| 11 | [Cleanup, docs, parity sign-off](phase-11-cleanup-docs-parity.md) | 3h | 07, 08, 10 | pending |
+| 04 | [App runtime: state, scheduler, CLI, single instance](phase-04-app-runtime.md) | 5h | 03 | in-progress: code done; awaits the Linux desktop and Windows manual checks |
+| 05 | [Menu, tray, alerts, autostart](phase-05-menu-tray-notify-autostart.md) | 6h | 04 | in-progress: code done; awaits the Windows toast spike (D9 gate) and the Linux desktop and Windows manual checks |
+| 06 | [Bubble window and UI](phase-06-bubble-window-ui.md) | 9h | 05 | in-progress: code done; awaits the v0.5.0 visual comparison and the Linux desktop and Windows manual checks |
+| 07 | [Details panel window](phase-07-panel-window.md) | 3h | 06 | in-progress: code done; awaits the v0.5.0 visual and DWM shadow comparison and the Linux desktop and Windows manual checks |
+| 08 | [Fullscreen auto-hide](phase-08-fullscreen-auto-hide.md) | 2h | 06 | in-progress: code done; awaits the Linux desktop and Windows manual checks |
+| 09 | [Updater](phase-09-updater-migration.md) | 4h | 05 | in-progress: code done; awaits the user generating the signing key and setting `pubkey`, and the Linux desktop manual check |
+| 10 | [Release pipeline and legacy-client compatibility](phase-10-ci-release.md) | 4h | 09 | in-progress: code done; awaits the user-approved `release.yml` and `release-legacy.yml` draft dry runs, which need the signing key |
+| 11 | [Cleanup, docs, parity sign-off](phase-11-cleanup-docs-parity.md) | 3h | 07, 08, 10 | in-progress: docs done; awaits the Windows parity checklist on Windows 10 and 11 and the Linux x86_64 X11 smoke run |
 
 Run the phases strictly in order. Phases 07, 08 and 09 all edit
 `src/platform/windows.rs` and `src/lib.rs`, so they must not run in parallel.

@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Scaffold Tauri crate, JS toolchain and CI"
-status: completed
+status: in-progress
 priority: P1
 effort: "5h"
 dependencies: []

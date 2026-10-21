@@ -11,7 +11,3 @@ current Tauri port.
   app is not notarized.
 - **Wayland-native positioning.** Position, snap and keep the bubble on top
   under native Wayland. Today these work only through Xwayland.
-- **Repository and product rename.** A new name to replace
-  "claude-code-usage-bubble" is under discussion. Any rename must keep the
-  legacy update asset names and the GitHub redirects working, so that installed
-  copies can still find and download updates.

@@ -1,7 +1,7 @@
 ---
 phase: 4
 title: "App runtime: state, scheduler, CLI, single instance"
-status: completed
+status: in-progress
 priority: P1
 effort: "5h"
 dependencies: [3]
