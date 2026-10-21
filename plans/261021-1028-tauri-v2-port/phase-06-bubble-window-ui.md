@@ -1,7 +1,7 @@
 ---
 phase: 6
 title: "Bubble window and UI"
-status: pending
+status: in-progress
 priority: P1
 effort: "9h"
 dependencies: [5]
@@ -98,6 +98,33 @@ corners for the hit area (D4).
 1. Write `layout.js` and its tests first. Compare the outputs against hand-computed values from the Rust formulas at widths 200 and 360, at dpi 96 and 144 (including 300 px at 144 dpi, where `innerWidth * dpr` would drift).
 2. Build the window module and the platform hooks.
 3. Wire the HTML. Check visually against a v0.5.0 screenshot at 100% and 150% scale.
+
+## Todo
+
+- [x] `ui/layout.js`: `headMetrics`, `tailLayout`, `ringDash`, `remainingFraction`, `pulseT`, `brighten`, plus `usageFillWidth`, `timeFillWidth`, `headLabelText` and `cssPx`; `tests/js/layout.test.js` checks them against values from the Rust formulas at 200 and 360 logical, dpi 96 and 144 (300 px at 144 dpi included) and 140 at 120 dpi
+- [x] `ui/bubble.html`, `ui/bubble.css` (palette per `[data-theme]`, dead corners), `ui/bubble.js` (layout, texts from the payload only, pulse, 60 s time progress, `visibilitychange`, pointer drag/click, `contextmenu`, Ctrl+wheel), `ui/tauri-bridge.js`
+- [x] `src/bubble.rs` rewritten: builder options as listed, exact physical size and saved/default position clamped into the work area, refit on `ScaleFactorChanged`, `destroy()` only with recreate after `Destroyed`, show on `bubble_ready` or the 1.5 s fallback, `widget_visible` honoured at creation
+- [x] `src/platform/windows.rs`: `apply_no_activate`, `show_no_activate`, `hide`, `install_bubble_hook` (`WM_EXITSIZEMOVE`, `WM_SETTINGCHANGE`, `WM_DISPLAYCHANGE`, plus `MA_NOACTIVATE`), `taskbar`
+- [x] Linux/macOS move end: 250 ms debounce armed by `bubble_drag_start`, re-armed while X11 Button1 is held (`platform::linux::button1_down`); theme from `window.theme()` and `ThemeChanged`; native Wayland skips snap, clamp and saving
+- [x] Move end snaps with peers in `LIVE_USAGE` order, moves only on a change, saves the position
+- [x] Commands `bubble_click` (logs until the panel exists), `bubble_drag_start`, `bubble_resize_step`, `bubble_ready`; resize around each centre without snap or save
+- [x] Reset position moves the existing bubbles to their defaults
+- [x] `src/core/visibility.rs` with tests for every row of the transition table; user show/hide goes through it
+- [x] Deleted `src/os/mod.rs` and `src/os/string.rs` (`src/os/theme.rs` was already gone)
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (181 passed, 1 ignored), `npm run lint`, `npm test` (32 passed), `npm run tauri build -- --no-bundle`; CI green on `windows-latest`, `ubuntu-22.04` and `macos-latest`
+- [x] Headless Chromium render of the page with a stubbed `__TAURI__` at 100%, 150% and 200% (layout, both themes, dead corners) and synthetic pointer checks (click, drag past 3 px, no drag on a later hover, Ctrl+wheel, right-click on the pill only)
+- [ ] Visual comparison against a v0.5.0 screenshot at 100% and 150% (none in the repo; Windows manual check)
+- [ ] Linux desktop (X11) and Windows manual checks below
+
+## Implementation notes
+
+- Rust sends a `theme` event (`{ isDark }`) to every webview when the system theme changes, then fresh payloads, because the fill colours also depend on the theme. Windows reads `SystemUsesLightTheme` on `WM_SETTINGCHANGE` and ignores tao's `ThemeChanged`, which follows the apps setting.
+- The visibility state (`user_hidden`, `hidden_by_fullscreen`) lives in `AppState`; `Runtime::apply_visibility(event)` applies `core::visibility::next` and is the entry point for the fullscreen thread. A user show or hide also saves `widget_visible`.
+- Window event handlers and the Windows hook hand their Tauri work to a short-lived thread, so a refit runs after tao's own `WM_DPICHANGED` resize and nothing runs inside a window procedure.
+- A new bubble picks the monitor its saved position overlaps most (else the nearest, else the primary) for its DPI and work area.
+- The head label is measured at its drawn weight (600) for the "5H" fallback; the reserved tail widths ("999d", "100%") are measured at regular weight, as the GDI bubble did.
+- The details panel does not exist yet, so a bubble click is only logged.
+- On Linux there is no display-change hook, so clamping after a resolution change happens only on Windows. The README note on transparency without a compositor belongs to the docs phase.
 
 ## Validation
 
