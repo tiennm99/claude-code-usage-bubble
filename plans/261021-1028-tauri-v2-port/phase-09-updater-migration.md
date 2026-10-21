@@ -107,7 +107,7 @@ self-replaces on Windows and runs the plugin's install on the AppImage.
 - [x] Tests: version (`v1.2.3-rc1` = 1.2.3, `v1` = 1.0.0, `abc` = 0.0.0, no downgrade), channel detection, staging and log paths, stage-and-swap, error mapping and `TargetNotFound` to Up to date, update proxy bypass, plugin config parse
 - [x] Step 3: signature check verified in the pinned plugin source and by running its tamper tests (see notes)
 - [x] Step 4: builder timeout vs download verified in the pinned plugin source (see notes)
-- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (216 passed, 1 ignored), `cargo test -- version:: update::` (18 passed), `npm run lint`, `npm test` (37 passed), `npm run tauri build -- --no-bundle`
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (216 passed, 1 ignored), `cargo test -- version:: update::` (18 passed), `npm run lint`, `npm test` (37 passed), `npm run tauri build -- --no-bundle`; CI green on `windows-latest`, `ubuntu-22.04` and `macos-latest`
 - [ ] Linux desktop (X11) manual check below
 
 ## Implementation notes
