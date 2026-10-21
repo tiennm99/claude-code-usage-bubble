@@ -30,6 +30,8 @@ update again.
   Only the workflow steps that check or sign see them; dependency
   installs and compilation run without them. A signing step fails hard
   when the key is empty, so no unsigned build is published.
+- No job keeps the checkout token on disk, and only the publish jobs,
+  which build nothing, hold the `contents: write` token.
 - Keep an **offline backup** of the private key file and its password
   (for example an encrypted copy on removable media and the password in
   a password manager). GitHub secrets cannot be read back, so the
@@ -168,9 +170,11 @@ is available only after the Tauri port merges into `main`:
 2. Start "Release legacy" from the Actions tab with `ref` set to a ref
    holding the Win32 sources (for example `v0.5.0`), `version` set to
    `X.Y.Z`, `tag` set to `vX.Y.Z`, and `draft` left at `true`.
-3. The workflow patches the `Cargo.toml` version at that ref, builds
-   with `cargo build --release --locked`, signs the exe with the same
-   updater key and writes a Windows-only `latest.json`. Check the draft:
+3. The workflow patches the version at that ref in `Cargo.toml` and in
+   the package's own `Cargo.lock` entry, so the build resolves no
+   dependency. It builds with `cargo build --release --locked`, signs
+   the exe with the same updater key and writes a Windows-only
+   `latest.json`. Check the draft:
    it holds `claude-code-usage-bubble.exe`, its `.sig` and `latest.json`.
 4. Publish it: either edit the draft into a release marked latest, or
    delete the draft and re-run the workflow with `draft` set to `false`,
