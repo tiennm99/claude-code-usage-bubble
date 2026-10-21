@@ -1,15 +1,18 @@
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)
+![Linux x86_64](https://img.shields.io/badge/platform-Linux_x86__64-blue)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 # Claude Code Usage Bubble
 
 A floating, draggable circular bubble that shows your Claude Code and/or
-Codex usage on Windows — inspired by the floating "memory boost ball" UX
-of 360 Security and IObit Advanced SystemCare.
+Codex usage on Windows and Linux — inspired by the floating "memory boost
+ball" UX of 360 Security and IObit Advanced SystemCare.
 
 Drop it anywhere on screen, drag it around, snap it to a monitor edge,
 left-click for a panel with both your 5-hour and 7-day windows, right-click
 for the menu.
+
+Linux ARM64 and macOS are not supported yet; see [ROADMAP.md](ROADMAP.md).
 
 ## Acknowledgements
 
@@ -35,25 +38,54 @@ self-updater are all written from scratch against the same public APIs
   bars plus reset countdowns
 - Right-click for refresh, displayed providers, update frequency, startup,
   updates, exit
-- Optional system tray icons (one per enabled provider)
+- A system tray icon per enabled provider, with a usage badge
+- Desktop notifications when usage crosses a threshold, when a sign-in
+  expires and after an update was applied
 - Auto-hide when a fullscreen app is in the foreground (games, video,
   presentations) — reappears when you leave fullscreen
 
 ## Who this is for
 
-Windows 10/11 users who already have **Claude Code (CLI or App) installed
-and signed in on Windows**. Codex support is optional — install and sign in
-to the Codex CLI, then enable Codex from the right-click **Providers** menu.
+Windows 10/11 and Linux x86_64 users who already have **Claude Code (CLI or
+App) installed and signed in** on the same machine. Codex support is
+optional — install and sign in to the Codex CLI, then enable Codex from the
+right-click **Providers** menu.
 
 ## Requirements
 
-- Windows 10 or Windows 11
+- Windows 10 or Windows 11, or Linux x86_64 (see below)
 - Claude Code (CLI or App) installed and authenticated
 - Optional: Codex CLI installed and authenticated, if you want Codex usage
 
+### Windows
+
+The app draws its windows with the Microsoft Edge **WebView2 runtime**.
+Windows 11 ships it, and most up-to-date Windows 10 machines already have it.
+If it is missing, the app shows a message with the download link and exits;
+install the
+[Evergreen WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+and start the app again.
+
+### Linux
+
+- **Runtime libraries:** WebKitGTK 4.1 (`libwebkit2gtk-4.1-0` on
+  Debian/Ubuntu) and, for the tray icons, `libayatana-appindicator3-1`.
+  The `.deb` pulls these in. Without an AppIndicator library the app runs
+  without tray icons.
+- **A compositing window manager.** The bubble is a transparent window;
+  without a compositor its corners are drawn opaque.
+- **X11 is the supported session.** Under Wayland the app runs through
+  Xwayland, where positioning, snapping and always-on-top work. Without
+  Xwayland (or with `GDK_BACKEND=wayland` set) the bubbles still show, but
+  they cannot be positioned, snapped, kept on top or saved where you drop
+  them.
+- **Tray limits:** Linux tray icons (AppIndicator) only open the menu. They
+  show no tooltip, and a left click does not toggle the bubble; use the
+  menu instead.
+
 ## Install
 
-### Download the latest release
+### Windows
 
 Grab `claude-code-usage-bubble.exe` from the
 [Releases page](https://github.com/tiennm99/claude-code-usage-bubble/releases/latest).
@@ -64,31 +96,72 @@ run it. The app self-updates from the same Releases feed.
 "Windows protected your PC". Click **More info** → **Run anyway**. Code
 signing is on the roadmap.
 
+### Linux x86_64
+
+From the same
+[Releases page](https://github.com/tiennm99/claude-code-usage-bubble/releases/latest),
+pick one:
+
+- `claude-code-usage-bubble_X.Y.Z_amd64.AppImage`: make it executable
+  (`chmod +x`) and run it. The AppImage self-updates in place.
+- `claude-code-usage-bubble_X.Y.Z_amd64.deb`: install it with
+  `sudo apt install ./claude-code-usage-bubble_X.Y.Z_amd64.deb`. The app
+  still checks for updates, but installing one is left to you: download the
+  new `.deb` and install it the same way.
+
 ### Build from source
+
+Prerequisites: the [Rust toolchain](https://www.rust-lang.org/tools/install)
+and [Node.js](https://nodejs.org/) with npm. The Tauri CLI is a local dev
+dependency, so `npm ci` installs it.
+
+On Windows:
 
 ```powershell
 git clone https://github.com/tiennm99/claude-code-usage-bubble
 cd claude-code-usage-bubble
-cargo build --release
+npm ci
+npm run tauri build -- --no-bundle
 ```
 
-The binary lands at `target/release/claude-code-usage-bubble.exe`.
+The binary lands at `target\release\claude-code-usage-bubble.exe`.
+
+On Linux x86_64, install the build dependencies first (Debian/Ubuntu):
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+git clone https://github.com/tiennm99/claude-code-usage-bubble
+cd claude-code-usage-bubble
+npm ci
+npm run tauri build -- --no-bundle
+```
+
+The binary lands at `target/release/claude-code-usage-bubble`. To build the
+`.deb` and AppImage instead, also install `patchelf` (the AppImage needs it)
+and run `npm run tauri build -- --bundles deb,appimage`; they land under
+`target/release/bundle/`.
+
+Local builds carry no updater signature (`createUpdaterArtifacts` is off in
+`tauri.conf.json`), so they cannot be published as an update. Only the
+release workflow signs builds; see
+[docs/release-process.md](docs/release-process.md).
 
 ## Use
 
-Run `claude-code-usage-bubble.exe`. The bubble appears near the bottom-right
-corner of your primary monitor on first launch. Drag it where you want it,
-release to snap to the nearest edge if you let go close to one.
+Run the app. The bubble appears near the bottom-right corner of your
+primary monitor on first launch. Drag it where you want it, release to snap
+to the nearest edge if you let go close to one.
 
 - **Left-click** the bubble to open the expanded panel (5h + 7d + countdowns)
 - **Right-click** for refresh, providers, refresh frequency, "Start with
-  Windows", controls, auto-update check (Disabled / Hourly / Daily / Weekly),
-  manual "Check for updates", exit
+  Windows" ("Start at login" on Linux), controls, auto-update check
+  (Disabled / Hourly / Daily / Weekly), manual "Check for updates", exit
 - **Drag** anywhere — it floats on top of all other windows
 - **Ctrl + MouseWheel** on the bubble, or **Controls** in the right-click
   menu, to resize it
-- **Tray icon** (if enabled): left-click toggles the bubble visibility,
-  right-click opens the same menu
+- **Tray icon:** left-click toggles the bubble visibility, right-click opens
+  the same menu (on Linux, any click opens the menu)
 
 ### Providers
 
@@ -103,23 +176,52 @@ Use the right-click **Providers** menu to choose what is shown:
 When multiple providers are shown, each gets its own bubble that you can position
 independently.
 
+### Changes from the v0.5.0 Windows build
+
+The app moved from a hand-written Win32 UI to Tauri. Most behaviour is the
+same; these differences are visible:
+
+- The transparent corners around the round bubble no longer pass clicks
+  through to the window below; they just ignore clicks.
+- Alerts are Windows toast notifications instead of tray balloons, so they
+  no longer use a warning or info icon.
+- Proxy auto-configuration (PAC scripts and WPAD) is no longer used. A
+  static system proxy, its bypass list and the `HTTPS_PROXY`-style
+  environment variables still are.
+- Only one copy runs per signed-in user session, instead of one per machine.
+
 ## Diagnostics
 
-```powershell
-claude-code-usage-bubble.exe --diagnose
-```
-
-This writes a log file to:
-
 ```text
-%TEMP%\claude-code-usage-bubble.log
+claude-code-usage-bubble.exe --diagnose     # Windows
+claude-code-usage-bubble --diagnose         # Linux .deb (pass the same flag to the AppImage)
 ```
+
+This writes a log file, truncated on each start, to:
+
+| OS | Log file |
+|----|----------|
+| Windows | `%TEMP%\claude-code-usage-bubble.log` |
+| Linux | `$TMPDIR/claude-code-usage-bubble.log`, usually `/tmp/claude-code-usage-bubble.log` |
 
 Settings are saved to:
 
-```text
-%APPDATA%\ClaudeCodeUsageBubble\settings.json
-```
+| OS | Settings file |
+|----|---------------|
+| Windows | `%APPDATA%\ClaudeCodeUsageBubble\settings.json` |
+| Linux | `$XDG_CONFIG_HOME/ClaudeCodeUsageBubble/settings.json`, usually `~/.config/ClaudeCodeUsageBubble/settings.json` |
+
+Other files the app writes:
+
+| What | Windows | Linux |
+|------|---------|-------|
+| Update downloads and `update-error.log` | `%LOCALAPPDATA%\ClaudeCodeUsageBubble\updates\` | `~/.local/share/ClaudeCodeUsageBubble/updates/` |
+| Web view profile (cache, storage) | `%LOCALAPPDATA%\io.github.tiennm99.claudecodeusagebubble\` (WebView2) | `~/.local/share/io.github.tiennm99.claudecodeusagebubble/` (WebKitGTK) |
+
+On Windows the app also writes its notification icon to
+`%LOCALAPPDATA%\ClaudeCodeUsageBubble\icon.png` and registers it under
+`HKCU\Software\Classes\AppUserModelId\io.github.tiennm99.claudecodeusagebubble`,
+which Windows needs to show toasts from a portable exe.
 
 ## Privacy and security
 
