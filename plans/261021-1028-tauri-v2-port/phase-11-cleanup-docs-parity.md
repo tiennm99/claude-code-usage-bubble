@@ -1,7 +1,7 @@
 ---
 phase: 11
 title: "Cleanup, docs, parity sign-off"
-status: pending
+status: in-progress
 priority: P1
 effort: "3h"
 dependencies: [7, 8, 10]
@@ -57,6 +57,25 @@ parity checklist before the first Tauri release.
 
 - Modify: `README.md`, `docs/release-process.md`
 - Delete: any leftover detached Win32 files (expected: none)
+
+## Todo
+
+- [x] Leftover sweep: the `windows` crate is used only in `src/platform/windows.rs`; the other `windows::` matches are calls into the `platform::windows` module (`src/bubble.rs`, `src/menu.rs`, `src/panel.rs`, `src/platform/mod.rs`). `src/os`, `src/tray` and `res/icon.rc` are gone; the empty untracked `src/i18n/` directory was removed. `res/windows-app-manifest.xml` stays (embedded by `build.rs`), and so do `src/icons/*` (the icon sources `icons/` was generated from)
+- [x] Stale Windows-only header comment in `src/creds/local_fs.rs` corrected (the credentials path is per OS)
+- [x] `README.md`: Windows and Linux x86_64 badges, Linux ARM64 and macOS unsupported (links `ROADMAP.md`), WebView2 requirement, Linux runtime deps, compositor, Wayland and tray limits, log, settings, update and webview profile paths per OS, the AUMID registration, privacy list, visible intentional changes (dead corners, toasts, PAC/WPAD, per-session lock), tray icons not optional, Linux install (AppImage self-updates, `.deb` check only), rewritten "Build from source"
+- [x] `docs/release-process.md`: `Cargo.toml` as the only version source and `cargo build` for `Cargo.lock`, signing-key custody and secrets with an offline backup, the asset table and `latest.json` shape, the rename rule, the legacy-client asset contract, dry-run steps, the `release-legacy.yml` rollback procedure, residual risk
+- [x] Links in both docs resolve; claims checked against the code and workflows
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` (216 passed, 1 ignored), `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle -- --locked`
+- [ ] Windows parity checklist above, on Windows 10 and 11 at 100% and 150% (manual, needs a Windows machine with the CI artifact; this host has no Windows or display)
+- [ ] Linux x86_64 X11 smoke run (manual, needs a desktop)
+
+## Implementation notes
+
+- **`.deb` dependencies checked.** A host-built `.deb` declares `Depends: libayatana-appindicator3-1, libwebkit2gtk-4.1-0, libgtk-3-0`, so the README's "the `.deb` pulls these in" holds.
+- **Webview profile paths.** Tauri 2.12 sets the webview data directory to `app_local_data_dir()` on Windows and Linux (`tauri` `src/manager/webview.rs`), which is `<LocalAppData>/<identifier>`; the README lists it per OS.
+- **Linux tray.** AppIndicator icons deliver no click events and no tooltip, so the README tells Linux users to use the menu; the badge still renders.
+- **Privacy list.** The README never named WinHTTP, so the list is unchanged. The AUMID registry key and icon PNG are listed with the other written files instead.
+- **Manual checklist open.** Every row needs a Windows 10/11 machine; the earlier phases' Windows manual checks are also still open. Nothing in this phase changes runtime behaviour, so no parity row can have regressed here.
 
 ## Validation
 
