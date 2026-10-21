@@ -22,7 +22,9 @@ built with, so losing the private key means no installed copy can ever
 update again.
 
 - The public key is `plugins.updater.pubkey` in `tauri.conf.json`.
-  Both release workflows refuse to build while it is empty.
+  `release.yml` refuses to build while it is empty. `release-legacy.yml`
+  does not read it, because the Win32 sources it builds have no
+  `tauri.conf.json`; it checks only the private key.
 - The private key and its password are the repository secrets
   `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
   Only the workflow steps that check or sign see them; dependency
