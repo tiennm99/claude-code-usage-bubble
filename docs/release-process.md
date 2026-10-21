@@ -127,9 +127,11 @@ public Releases feed and does not reach any client, legacy or Tauri.
    keeps the tag push from starting a publishing run; never use a plain
    `vX.Y.Z` tag for a dry run, because pushing it publishes a release
    marked latest.
-2. On a scratch branch, set `Cargo.toml` `version` to `0.0.0-test` and
-   commit. The tag check also runs for drafts, so the tag must point at a
-   commit whose `Cargo.toml` version matches it.
+2. On a scratch branch, set `Cargo.toml` `version` to `0.0.0-test`, run
+   `cargo build` locally to refresh `Cargo.lock`, and commit both files.
+   The release jobs build with `--locked`, so a stale `Cargo.lock` fails
+   them before any draft exists. The tag check also runs for drafts, so
+   the tag must point at a commit whose `Cargo.toml` version matches it.
 3. Tag that commit and push the tag, then start the "Release" workflow
    from the Actions tab (`workflow_dispatch`) with that tag as input.
 4. Check the draft: it must hold exactly the six assets in the table
