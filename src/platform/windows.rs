@@ -139,6 +139,26 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
     std::fs::write(path, bytes)
 }
 
+/// The current user's start-at-login entry, `HKCU\…\Run\<name>`. Its data
+/// is the quoted exe path, as every earlier release wrote it, so a path with
+/// spaces cannot resolve to a planted prefix. HKLM is never written, so an
+/// elevated run cannot leave an entry that a normal run cannot remove.
+/// `is_enabled` honours a Task Manager disable in `StartupApproved\Run`.
+pub fn autostart_entry(name: &str) -> io::Result<auto_launch::AutoLaunch> {
+    let exe = std::env::current_exe()?;
+    Ok(auto_launch::AutoLaunch::new(
+        name,
+        &quoted_path(&exe),
+        auto_launch::WindowsEnableMode::CurrentUser,
+        &[] as &[&str],
+    ))
+}
+
+/// `path` wrapped in double quotes, the form a `Run` value needs.
+fn quoted_path(path: &Path) -> String {
+    format!("\"{}\"", path.display())
+}
+
 /// Bring `window` to the foreground. A popup menu needs its owner in the
 /// foreground, or it does not dismiss on a click elsewhere.
 pub fn set_foreground(window: &tauri::WebviewWindow) {
@@ -150,5 +170,18 @@ pub fn set_foreground(window: &tauri::WebviewWindow) {
             }
         }
         Err(err) => log::warn!("no HWND for {}: {err}", window.label()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_value_path_is_quoted() {
+        assert_eq!(
+            quoted_path(Path::new(r"D:\My Tools\claude-code-usage-bubble.exe")),
+            r#""D:\My Tools\claude-code-usage-bubble.exe""#
+        );
     }
 }

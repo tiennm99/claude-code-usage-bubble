@@ -13,6 +13,7 @@ use tauri::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
 };
 use tauri::{AppHandle, Manager, State, Wry};
+#[cfg(not(windows))]
 use tauri_plugin_autostart::{AutoLaunchManager, ManagerExt};
 
 use crate::core::i18n::LocaleStrings;
@@ -72,10 +73,7 @@ impl MenuCache {
 /// Whether the app starts at login. Reads the live entry, so a Task
 /// Manager disable shows as unchecked; any read error counts as off.
 pub fn autostart_enabled(app: &AppHandle) -> bool {
-    if app.try_state::<AutoLaunchManager>().is_none() {
-        return false;
-    }
-    app.autolaunch().is_enabled().unwrap_or_else(|err| {
+    autostart_state(app).unwrap_or_else(|err| {
         log::warn!("autostart state unreadable: {err}");
         false
     })
@@ -84,19 +82,56 @@ pub fn autostart_enabled(app: &AppHandle) -> bool {
 /// Flip the start-at-login entry. Errors are logged; the next menu rebuild
 /// shows the real state either way.
 pub fn toggle_autostart(app: &AppHandle) {
-    if app.try_state::<AutoLaunchManager>().is_none() {
-        log::warn!("autostart plugin is not available");
-        return;
-    }
-    let manager = app.autolaunch();
-    let result = if autostart_enabled(app) {
-        manager.disable()
-    } else {
-        manager.enable()
-    };
+    let result = autostart_state(app).and_then(|enabled| set_autostart(app, !enabled));
     if let Err(err) = result {
         log::error!("autostart toggle failed: {err}");
     }
+}
+
+/// Windows bypasses the autostart plugin: its builder cannot pin the
+/// current-user mode, so an elevated run would write an all-users entry
+/// with an unquoted path (see `platform::windows::autostart_entry`).
+#[cfg(windows)]
+fn autostart_state(_app: &AppHandle) -> Result<bool, String> {
+    crate::platform::windows::autostart_entry(crate::runtime::AUTOSTART_NAME)
+        .map_err(|err| err.to_string())?
+        .is_enabled()
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(windows)]
+fn set_autostart(_app: &AppHandle, enable: bool) -> Result<(), String> {
+    let entry = crate::platform::windows::autostart_entry(crate::runtime::AUTOSTART_NAME)
+        .map_err(|err| err.to_string())?;
+    let result = if enable {
+        entry.enable()
+    } else {
+        entry.disable()
+    };
+    result.map_err(|err| err.to_string())
+}
+
+/// Without the plugin (it failed to set up) start at login reads as off.
+#[cfg(not(windows))]
+fn autostart_state(app: &AppHandle) -> Result<bool, String> {
+    if app.try_state::<AutoLaunchManager>().is_none() {
+        return Ok(false);
+    }
+    app.autolaunch().is_enabled().map_err(|err| err.to_string())
+}
+
+#[cfg(not(windows))]
+fn set_autostart(app: &AppHandle, enable: bool) -> Result<(), String> {
+    if app.try_state::<AutoLaunchManager>().is_none() {
+        return Err("autostart plugin is not available".into());
+    }
+    let manager = app.autolaunch();
+    let result = if enable {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    result.map_err(|err| err.to_string())
 }
 
 /// Build a native menu from the tree, keeping order, labels, check marks

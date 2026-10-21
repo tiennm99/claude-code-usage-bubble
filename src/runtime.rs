@@ -49,7 +49,7 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Name of the start-at-login entry: the Windows `Run` value name of every
 /// earlier release, so an existing entry is already the plugin's entry.
-const AUTOSTART_NAME: &str = "ClaudeCodeUsageBubble";
+pub const AUTOSTART_NAME: &str = "ClaudeCodeUsageBubble";
 
 #[cfg(windows)]
 const WEBVIEW2_MISSING_TITLE: &str = "Claude Code Usage Bubble";
@@ -202,19 +202,20 @@ impl Runtime {
     /// Bring the tray icons in line with state and rebuild their menus when
     /// the menu tree changed, or always with `force_menu` (after a menu
     /// click, whose native check mark may now be wrong). Runs on the main
-    /// thread; the state is snapshotted first.
+    /// thread and snapshots the state there, so a refresh queued by a worker
+    /// can never apply a view older than one a menu click applied inline.
     pub fn refresh_shell(&self, force_menu: bool) {
-        let (views, menu_snapshot) = self.with_state(|s| {
-            (
-                tray::views(&enabled_live_providers(&s.settings), &s.usage, &s.strings),
-                MenuSnapshot::of(s),
-            )
-        });
         let app = self.ui.app.clone();
         let dispatched = self.ui.app.run_on_main_thread(move || {
             let Some(runtime) = app.try_state::<Arc<Runtime>>() else {
                 return;
             };
+            let (views, menu_snapshot) = runtime.with_state(|s| {
+                (
+                    tray::views(&enabled_live_providers(&s.settings), &s.usage, &s.strings),
+                    MenuSnapshot::of(s),
+                )
+            });
             let entries = menu_snapshot.entries(menu::autostart_enabled(&app));
             runtime.trays.sync(&app, &views, &entries);
             if runtime.menu_cache.update(&entries, force_menu) {
@@ -394,9 +395,7 @@ impl Runtime {
         }
         let enabled = self.update_settings(|s| s.toggle_live_provider(provider));
         if enabled {
-            if let Err(err) = create_bubble_window(&self.ui.app, provider) {
-                log::error!("bubble for {} could not be created: {err}", provider.slug());
-            }
+            spawn_bubble_window(&self.ui.app, provider);
         } else if let Some(window) = self.ui.app.get_webview_window(&bubble_label(provider)) {
             if let Err(err) = window.destroy() {
                 log::warn!(
@@ -611,14 +610,20 @@ pub fn run() {
         std::env::set_var("GDK_BACKEND", "x11");
     }
 
-    let autostart = tauri_plugin_autostart::Builder::new().app_name(AUTOSTART_NAME);
-    #[cfg(target_os = "macos")]
-    let autostart = autostart.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
-
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // First, so a second instance exits before anything else starts.
-        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
-        .plugin(autostart.build())
+        .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}));
+    // Windows writes its own current-user entry (see `menu::autostart_enabled`).
+    #[cfg(not(windows))]
+    let builder = {
+        let autostart = tauri_plugin_autostart::Builder::new().app_name(AUTOSTART_NAME);
+        #[cfg(target_os = "macos")]
+        let autostart =
+            autostart.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+        builder.plugin(autostart.build())
+    };
+
+    let app = builder
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             crate::commands::get_bubble_state,
@@ -674,26 +679,16 @@ fn on_window_event(window: &Window, event: &WindowEvent) {
             let Some(provider) = ProviderId::from_slug(slug) else {
                 return;
             };
-            let app = window.app_handle().clone();
-            let dispatched = window.run_on_main_thread(move || {
-                let Some(runtime) = app.try_state::<Arc<Runtime>>() else {
-                    return;
-                };
-                if runtime.exiting.load(Ordering::Acquire) {
-                    return;
-                }
-                let enabled = runtime.with_state(|s| s.settings.is_provider_enabled(provider));
-                if enabled && app.get_webview_window(&bubble_label(provider)).is_none() {
-                    if let Err(err) = create_bubble_window(&app, provider) {
-                        log::error!(
-                            "bubble for {slug} could not be recreated: {err}",
-                            slug = provider.slug()
-                        );
-                    }
-                }
-            });
-            if let Err(err) = dispatched {
-                log::warn!("bubble recreate check could not be queued: {err}");
+            let Some(runtime) = window.try_state::<Arc<Runtime>>() else {
+                return;
+            };
+            if runtime.exiting.load(Ordering::Acquire) {
+                return;
+            }
+            // The old window is already out of the manager here, so the
+            // existence check in `create_bubble_window` sees it gone.
+            if runtime.with_state(|s| s.settings.is_provider_enabled(provider)) {
+                spawn_bubble_window(window.app_handle(), provider);
             }
         }
         _ => {}
@@ -811,6 +806,31 @@ fn monitor_rects(app: &AppHandle) -> Vec<Rect> {
 /// standing in for the real bubble window. Does nothing while a window
 /// with the label still exists; a destroyed one is recreated from its
 /// `Destroyed` event.
+/// Create a bubble from a short-lived thread. Building a webview window
+/// inside a menu or window event handler deadlocks on Windows (WebView2),
+/// while off the main thread the build is posted to the event loop. The
+/// lock makes a toggle and a `Destroyed` recreate for the same provider
+/// check and build one at a time, so only one of them creates the window.
+/// The main thread never takes it.
+fn spawn_bubble_window(app: &AppHandle, provider: ProviderId) {
+    static CREATE: Mutex<()> = Mutex::new(());
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("bubble-create".into())
+        .spawn(move || {
+            let _serial = CREATE.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Err(err) = create_bubble_window(&app, provider) {
+                log::error!("bubble for {} could not be created: {err}", provider.slug());
+            }
+        });
+    if let Err(err) = spawned {
+        log::error!(
+            "bubble for {} not created, no thread: {err}",
+            provider.slug()
+        );
+    }
+}
+
 fn create_bubble_window(app: &AppHandle, provider: ProviderId) -> tauri::Result<()> {
     let label = bubble_label(provider);
     if app.get_webview_window(&label).is_some() {

@@ -508,6 +508,7 @@ dependencies = [
 name = "claude-code-usage-bubble"
 version = "0.5.0"
 dependencies = [
+ "auto-launch",
  "dirs 6.0.0",
  "flate2",
  "libc",
