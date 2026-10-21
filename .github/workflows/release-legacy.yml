@@ -94,7 +94,9 @@ jobs:
 
       # Only the package's own version changes, in Cargo.toml and its
       # Cargo.lock entry, so the `--locked` build below resolves nothing and
-      # fails if the lockfile differs in anything else.
+      # fails if the lockfile differs in anything else. Git for Windows checks
+      # the files out with CRLF endings, so the patterns accept a trailing CR
+      # and keep it.
       - name: Set the Cargo.toml and Cargo.lock version
         run: |
           sed -i -E '0,/^version[[:space:]]*=/s/^version[[:space:]]*=[[:space:]]*"[^"]*"/version = "'"$VERSION"'"/' Cargo.toml
@@ -103,8 +105,8 @@ jobs:
             echo "::error::Cargo.toml version is '$actual' after patching, expected '$VERSION'."
             exit 1
           fi
-          sed -i -E '/^name = "claude-code-usage-bubble"$/{n;s/^version = "[^"]*"$/version = "'"$VERSION"'"/}' Cargo.lock
-          if ! grep -A1 -x 'name = "claude-code-usage-bubble"' Cargo.lock | grep -qx "version = \"$VERSION\""; then
+          sed -i -E '/^name = "claude-code-usage-bubble"\r?$/{n;s/^version = "[^"]*"(\r?)$/version = "'"$VERSION"'"\1/}' Cargo.lock
+          if ! tr -d '\r' < Cargo.lock | grep -A1 -x 'name = "claude-code-usage-bubble"' | grep -qx "version = \"$VERSION\""; then
             echo "::error::Cargo.lock has no claude-code-usage-bubble entry at version '$VERSION' after patching."
             exit 1
           fi
