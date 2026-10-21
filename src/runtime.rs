@@ -634,6 +634,7 @@ pub fn run() {
         ])
         .on_window_event(on_window_event)
         .on_menu_event(menu::on_menu_event)
+        .on_tray_icon_event(tray::on_tray_icon_event)
         .setup(move |app| setup(app, &cli))
         .build(tauri::generate_context!());
 

@@ -251,18 +251,22 @@ fn create(app: &AppHandle, view: &TrayView, entries: &[MenuEntry]) -> tauri::Res
         .tooltip(&view.tooltip)
         .menu(&menu::build(app, entries)?)
         .show_menu_on_left_click(false)
-        .on_tray_icon_event(on_tray_icon_event)
         .build(app)
 }
 
-fn on_tray_icon_event(tray: &TrayIcon<Wry>, event: TrayIconEvent) {
+/// App-level tray click handler, registered on the Tauri builder rather than
+/// per icon. Tauri calls a per-icon handler while holding the per-icon
+/// listener table, and the refresh below runs inline on the main thread and
+/// may build a missing tray icon, which locks that same table to register
+/// itself: a same-thread deadlock. The app-level table is never touched by
+/// icon creation.
+pub fn on_tray_icon_event(app: &AppHandle, event: TrayIconEvent) {
     if let TrayIconEvent::Click {
         button: MouseButton::Left,
         button_state: MouseButtonState::Up,
         ..
     } = event
     {
-        let app = tray.app_handle();
         if let Some(runtime) = app.try_state::<Arc<Runtime>>() {
             let runtime = Arc::clone(&runtime);
             runtime.toggle_widget();
