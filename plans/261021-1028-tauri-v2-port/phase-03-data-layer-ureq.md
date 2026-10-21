@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "Data layer on ureq"
-status: pending
+status: completed
 priority: P1
 effort: "4h"
 dependencies: [2]
@@ -58,6 +58,43 @@ only two Win32 couplings: `src/net/winhttp.rs`, and the `CommandExt` import in
    - Credential JSON: missing fields, a float `expiresAt`, null `tokens`, and an empty `CODEX_HOME`.
    - Proxy strings: per-scheme with and without `https=`, bare `h:p`, and `ProxyOverride` matches for `*.anthropic.com`, `chatgpt.com` and `<local>`.
 3. Add a `#[ignore]` live smoke test that polls the real providers when credentials exist. Run it by hand.
+
+## Todo
+
+- [x] `src/net/mod.rs` on ureq: same `Client`/`RequestBuilder`/`Response` surface, `Transport(String)` replaces `Win`, `http_status_as_error(false)`, connect 60 s / receive 30 s / global 120 s, gzip, rustls with the platform verifier, `claude-code-usage-bubble/<version>` User-Agent with per-request override
+- [x] Proxy: env proxies from ureq; `cfg(windows)` `platform::windows::system_proxy()` reads `ProxyEnable`/`ProxyServer`/`ProxyOverride` only when no env proxy is set; `core::proxy` parses per-scheme and bare servers, `;`-split override globs and `<local>`; `Client` holds a proxied and a direct agent and picks per request
+- [x] `refresh.rs`: Windows candidates and `CREATE_NO_WINDOW` behind `cfg(windows)`; Unix `claude -p .` / `codex exec .` searched in `PATH`, `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`; child reaped on a detached thread
+- [x] `usage/mod.rs` restored (providers, registry, headers, refresh, `Error`, `UsageProvider`); `src/lib.rs` declares `creds`, `net` and `platform`
+- [x] Test asserting `LIVE_USAGE` excludes OpenCode Go
+- [x] Deleted `src/net/winhttp.rs`
+- [x] Fixture tests in `tests/fixtures/*.json`: OAuth usage (full, partial, null buckets, null utilization), rate-limit headers (fractions, missing, negative, a 429 over loopback), ChatGPT envelope (null `rate_limit`, null windows, negative `reset_at`), ISO 8601 (`+0000`, lowercase `t`, before 1970), credential JSON (missing fields, float `expiresAt`, null `tokens`, empty `CODEX_HOME`), proxy strings
+- [x] `#[ignore]` `live_poll` smoke test, run by hand on the host: both providers returned data
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (112 passed, 1 ignored), `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle`
+- [x] CI Windows, Linux and macOS rows green, including the Windows proxy reader
+
+## Implementation notes
+
+- The registry reader uses `windows-registry` 0.6, the crate and major that
+  `auto-launch` already pulls, so no new crate is compiled and no `unsafe`
+  registry code is needed.
+- ureq always tunnels through an HTTP proxy with `CONNECT`, also for `http://`
+  targets. The loopback routing test asserts the `CONNECT` line instead of a
+  proxied reply.
+- `net::Error::Status` is kept so the providers compile unchanged; the client
+  never builds it, because every status comes back as a `Response`.
+- `net::system_proxy()` returns the system proxy only when no env proxy is
+  set, and `Client::system_proxy()` exposes the one in use for the updater
+  builder in Phase 09. Proxy URLs are never logged (they may hold
+  credentials).
+- An empty `CODEX_HOME` now counts as unset, as in the Codex CLI. Before, it
+  resolved to `auth.json` in the working directory.
+- A float `expiresAt` is truncated to whole milliseconds instead of being
+  treated as "no expiry".
+- `anthropic::parse_usage_body` and `codex_auth::{auth_path, parse_codex_json}`
+  were split out of the I/O paths so the fixtures test them directly; the
+  behaviour is unchanged.
+- The README note that PAC/WPAD is no longer evaluated belongs to the README
+  rewrite in Phase 11; this phase does not own the README.
 
 ## Validation
 
