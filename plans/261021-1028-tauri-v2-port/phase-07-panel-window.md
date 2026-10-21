@@ -1,7 +1,7 @@
 ---
 phase: 7
 title: "Details panel window"
-status: pending
+status: in-progress
 priority: P2
 effort: "3h"
 dependencies: [6]
@@ -72,6 +72,31 @@ dismisses it.
 
 1. Port `place_near` (already done in Phase 02) and wire the window.
 2. Write the HTML and CSS, then compare against a v0.5.0 screenshot.
+
+## Todo
+
+- [x] `src/panel.rs` rewritten: the `panel` webview with the listed builder options, created hidden at startup, hidden and shown but never destroyed; Alt+F4 hides it
+- [x] `panel::toggle`: same provider hides, otherwise `place_near` with the bubble's outer rect, the panel sized for the bubble's DPI and the union of all monitors, then `panel:update`, `show()` and `set_focus()`
+- [x] Focus loss hides the panel; a toggle within 150 ms of that hide for the same provider is ignored (pure `toggle_state`/`blur_state`, unit-tested)
+- [x] `refresh_if_visible` from `propagate`, outside the state lock, checked on the main thread against the provider on screen
+- [x] `src/platform/windows.rs`: `apply_toolwindow`, `round_corners` on each show, `disable_browser_accelerator_keys`; `apply_no_activate` shares the style helper
+- [x] `get_panel_state` command; `bubble_click` toggles the panel
+- [x] `ui/panel.html`, `ui/panel.css`, `ui/panel.js`: GDI coordinates, square bars, palette per `[data-theme]`, texts and colours from the payload only, row labels from `get_strings`, `contextmenu`, Ctrl+wheel and browser accelerator keys suppressed
+- [x] `ui/panel-view.js` (`panelFillWidth`, `isBrowserAccelerator`) with `tests/js/panel-view.test.js`
+- [x] Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (191 passed, 1 ignored), `npm run lint`, `npm test` (37 passed), `npm run tauri build -- --no-bundle`; CI green on `windows-latest`, `ubuntu-22.04` and `macos-latest`
+- [x] Headless Chromium render of the page with a stubbed `__TAURI__` in both themes (coordinates, fill widths, clipping)
+- [ ] Visual comparison against a v0.5.0 screenshot and the DWM shadow check (none in the repo; Windows manual check)
+- [ ] Linux desktop (X11) and Windows manual checks below
+
+## Implementation notes
+
+- The row labels ("5h", "7d") are not in `PanelPayload`; the page reads them once from the existing `get_strings` command, so the payload contract stays as planned.
+- The pure page helpers live in `ui/panel-view.js` instead of `ui/panel.js`, because `panel.js` reads `window.__TAURI__` on import and cannot run under `node --test`.
+- Tauri does not expose wry's `with_browser_accelerator_keys`, so `platform::windows::disable_browser_accelerator_keys` sets `AreBrowserAcceleratorKeysEnabled` through `with_webview` and reloads the page once at startup, because the setting applies from the next navigation. The `keydown` handler covers the same keys on every platform.
+- `bubble_click` is an async command, so the toggle is queued to the main thread instead of running inside the webview's IPC callback. Toggles and refreshes both run on the main thread, which keeps a refresh from drawing a provider the panel no longer shows.
+- The panel background colour is set from the theme before every show, and the payload is emitted before `show()`, against a white or stale flash.
+- `shadow(false)` is kept until the Windows screenshot comparison says otherwise.
+- Under native Wayland the panel is only resized, not moved (D12).
 
 ## Validation
 
