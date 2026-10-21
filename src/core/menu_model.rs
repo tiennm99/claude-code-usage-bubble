@@ -419,6 +419,99 @@ mod tests {
             .all(|e| matches!(e, MenuEntry::Hint { .. })));
     }
 
+    /// One line per node, indented by depth: `label [id] kind`.
+    fn outline(entries: &[MenuEntry], depth: usize, out: &mut Vec<String>) {
+        let pad = "  ".repeat(depth);
+        for e in entries {
+            match e {
+                MenuEntry::Action {
+                    command,
+                    label,
+                    enabled,
+                } => out.push(format!(
+                    "{pad}{label} [{}]{}",
+                    command.id(),
+                    if *enabled { "" } else { " grey" }
+                )),
+                MenuEntry::Check {
+                    command,
+                    label,
+                    checked,
+                    enabled,
+                } => out.push(format!(
+                    "{pad}{label} [{}] {}{}",
+                    command.id(),
+                    if *checked { "on" } else { "off" },
+                    if *enabled { "" } else { " grey" }
+                )),
+                MenuEntry::Hint { label } => out.push(format!("{pad}{label} hint")),
+                MenuEntry::Separator => out.push(format!("{pad}-")),
+                MenuEntry::Submenu { label, entries } => {
+                    out.push(format!("{pad}{label} >"));
+                    outline(entries, depth + 1, out);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_tree_keeps_order_labels_ids_and_states() {
+        let strings = I18n::load().strings().clone();
+        let m = build(MenuInput {
+            settings: &Settings::default(),
+            strings: &strings,
+            autostart_enabled: false,
+            update_status: UpdateStatus::Idle,
+        });
+        let mut lines = Vec::new();
+        outline(&m, 0, &mut lines);
+        let autostart = format!("  {} [autostart] off", strings.autostart_label());
+        let version = format!(
+            "  Check for updates · v{} [version]",
+            env!("CARGO_PKG_VERSION")
+        );
+        let expected = [
+            "Refresh [refresh]",
+            "Update frequency >",
+            "  1 minute [freq:60000] off",
+            "  5 minutes [freq:300000] on",
+            "  15 minutes [freq:900000] off",
+            "  1 hour [freq:3600000] off",
+            "Providers >",
+            "  Claude Code [provider:claude] on",
+            "  Codex [provider:chatgpt] off",
+            "  OpenCode Go [provider:opencode-go] off grey",
+            "Settings >",
+            &autostart,
+            "  Reset position [reset-position]",
+            &version,
+            "  Auto-update check >",
+            "    Disabled [update-interval:off] off",
+            "    Hourly [update-interval:3600] on",
+            "    Daily [update-interval:86400] off",
+            "    Weekly [update-interval:604800] off",
+            "Controls >",
+            "  Make smaller [size-smaller]",
+            "  Make larger [size-larger]",
+            "  Reset size [size-reset] grey",
+            "  -",
+        ];
+        let got: Vec<&str> = lines.iter().map(String::as_str).collect();
+        assert_eq!(got[..expected.len()], expected);
+        let tail: Vec<&str> = got[expected.len()..].to_vec();
+        assert_eq!(tail.len(), 9);
+        assert!(tail[..5].iter().all(|l| l.ends_with(" hint")), "{tail:?}");
+        assert_eq!(
+            tail[5..],
+            [
+                "Show widget [toggle-widget] on",
+                "-",
+                "Restart [restart]",
+                "Exit [exit]"
+            ]
+        );
+    }
+
     #[test]
     fn ids_round_trip_and_unknown_ids_are_rejected() {
         let m = menu(&Settings::default(), UpdateStatus::Idle);

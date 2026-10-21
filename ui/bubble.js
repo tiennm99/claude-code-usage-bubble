@@ -32,6 +32,13 @@ window.addEventListener('unhandledrejection', (event) => {
   logJs('error', `unhandled rejection: ${String(event.reason)}`);
 });
 
+window.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  tauri.core
+    .invoke('show_context_menu', { label: webview.label })
+    .catch((err) => logJs('error', `show_context_menu failed: ${String(err)}`));
+});
+
 webview
   .listen('bubble:update', (event) => render(event.payload))
   .catch((err) => logJs('error', `listen failed: ${String(err)}`));

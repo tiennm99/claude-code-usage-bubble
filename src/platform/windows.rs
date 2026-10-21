@@ -1,17 +1,23 @@
 //! Windows-only helpers. This is the only module that talks to Win32 APIs.
 
+use std::io;
+use std::path::Path;
 use std::time::Duration;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::GetAvailableCoreWebView2BrowserVersionString;
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
-use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND};
+use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+use windows::Win32::UI::WindowsAndMessaging::{
+    MessageBoxW, SetForegroundWindow, MB_ICONERROR, MB_OK, MB_SETFOREGROUND,
+};
 
 use crate::core::proxy::{self, SystemProxy};
 
 const INTERNET_SETTINGS_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+const AUMID_KEY_PREFIX: &str = r"Software\Classes\AppUserModelId\";
 
 /// The static proxy from `HKCU\…\Internet Settings`, or `None` when
 /// `ProxyEnable` is not 1 or no usable `ProxyServer` entry exists.
@@ -86,4 +92,63 @@ pub fn message_box_error(title: &str, text: &str) {
             MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
         )
     };
+}
+
+/// Register `aumid` so toasts from this portable exe are shown although no
+/// Start-menu shortcut carries the id: write
+/// `HKCU\Software\Classes\AppUserModelId\<aumid>` with `DisplayName` and
+/// `IconUri` (`icon_png` written to `icon_path`), then make it the process
+/// id. Each step is attempted; the first error is returned after all ran.
+pub fn register_aumid(
+    aumid: &str,
+    display_name: &str,
+    icon_png: &[u8],
+    icon_path: &Path,
+) -> io::Result<()> {
+    let icon = write_if_changed(icon_path, icon_png);
+    if let Err(err) = &icon {
+        log::warn!("AUMID icon {} not written: {err}", icon_path.display());
+    }
+
+    let key = windows_registry::CURRENT_USER
+        .create(format!("{AUMID_KEY_PREFIX}{aumid}"))
+        .and_then(|key| {
+            key.set_string("DisplayName", display_name)?;
+            if icon.is_ok() {
+                key.set_string("IconUri", icon_path.to_string_lossy().as_ref())?;
+            }
+            Ok(())
+        })
+        .map_err(io::Error::from);
+
+    // SAFETY: the HSTRING outlives the call.
+    let process = unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(aumid)) }
+        .map_err(io::Error::from);
+
+    key.and(process).and(icon)
+}
+
+/// Write `bytes` to `path` unless it already holds exactly them.
+fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if std::fs::read(path).is_ok_and(|current| current == bytes) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, bytes)
+}
+
+/// Bring `window` to the foreground. A popup menu needs its owner in the
+/// foreground, or it does not dismiss on a click elsewhere.
+pub fn set_foreground(window: &tauri::WebviewWindow) {
+    match window.hwnd() {
+        // SAFETY: the handle belongs to a live window of this process.
+        Ok(hwnd) => {
+            if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
+                log::debug!("SetForegroundWindow({}) refused", window.label());
+            }
+        }
+        Err(err) => log::warn!("no HWND for {}: {err}", window.label()),
+    }
 }

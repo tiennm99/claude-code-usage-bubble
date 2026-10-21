@@ -16,17 +16,20 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 use tauri::{
-    App, AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, Window,
-    WindowEvent,
+    AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
 };
+use tauri_plugin_notification::NotificationExt;
 
 use crate::cli::{self, CliArgs};
-use crate::core::geom::{self, Rect};
+use crate::core::geom::{self, Rect, DEFAULT_BUBBLE_SIZE, MAX_BUBBLE_SIZE, MIN_BUBBLE_SIZE};
 use crate::core::i18n::{I18n, LocaleStrings};
+use crate::core::menu_model::MenuCommand;
 use crate::core::payload::{self, BubblePayload, Canvas};
 use crate::core::settings::{self, Settings};
 use crate::core::state::{Alert, PollOutcome, UpdateStatus, UsageState};
+use crate::menu::{self, MenuCache, MenuSnapshot};
 use crate::scheduler::{self, Action, Message, SchedulerHost};
+use crate::tray::{self, Trays};
 use crate::usage::{self, refresh, ProviderId, Registry};
 use crate::{diag, handoff, net, platform};
 
@@ -43,6 +46,10 @@ const WAIT_PID_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Per-provider budget for the CLI credential refresh.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Name of the start-at-login entry: the Windows `Run` value name of every
+/// earlier release, so an existing entry is already the plugin's entry.
+const AUTOSTART_NAME: &str = "ClaudeCodeUsageBubble";
 
 #[cfg(windows)]
 const WEBVIEW2_MISSING_TITLE: &str = "Claude Code Usage Bubble";
@@ -146,6 +153,11 @@ pub struct Runtime {
     /// during a slow poll is dropped instead of stacking requests.
     poll_in_flight: AtomicBool,
     scheduler: Sender<Message>,
+    trays: Trays,
+    menu_cache: MenuCache,
+    /// Set once the process is ending, so destroyed bubbles are not
+    /// recreated during shutdown.
+    exiting: AtomicBool,
 }
 
 impl Runtime {
@@ -183,7 +195,35 @@ impl Runtime {
             )
         });
         self.ui.emit_bubble_updates(snapshot);
+        self.refresh_shell(false);
         self.send(Message::RecomputeCountdown(countdown));
+    }
+
+    /// Bring the tray icons in line with state and rebuild their menus when
+    /// the menu tree changed, or always with `force_menu` (after a menu
+    /// click, whose native check mark may now be wrong). Runs on the main
+    /// thread; the state is snapshotted first.
+    pub fn refresh_shell(&self, force_menu: bool) {
+        let (views, menu_snapshot) = self.with_state(|s| {
+            (
+                tray::views(&enabled_live_providers(&s.settings), &s.usage, &s.strings),
+                MenuSnapshot::of(s),
+            )
+        });
+        let app = self.ui.app.clone();
+        let dispatched = self.ui.app.run_on_main_thread(move || {
+            let Some(runtime) = app.try_state::<Arc<Runtime>>() else {
+                return;
+            };
+            let entries = menu_snapshot.entries(menu::autostart_enabled(&app));
+            runtime.trays.sync(&app, &views, &entries);
+            if runtime.menu_cache.update(&entries, force_menu) {
+                runtime.trays.set_menus(&app, &entries);
+            }
+        });
+        if let Err(err) = dispatched {
+            log::warn!("tray refresh could not reach the main thread: {err}");
+        }
     }
 
     /// Start a poll on a worker thread unless one is already running.
@@ -256,8 +296,8 @@ impl Runtime {
         }
     }
 
-    /// Show alerts. Until a notification backend is registered they only
-    /// reach the diagnostic log.
+    /// Show alerts as desktop notifications. The cooldown was applied when
+    /// they were raised; nothing here filters them.
     fn deliver_alerts(&self, alerts: Vec<Alert>) {
         if alerts.is_empty() {
             return;
@@ -266,7 +306,151 @@ impl Runtime {
         for alert in alerts {
             let (title, body) = alert.text(&strings);
             log::info!("alert: {title}: {body}");
+            let shown = self
+                .ui
+                .app
+                .notification()
+                .builder()
+                .title(&title)
+                .body(&body)
+                .show();
+            if let Err(err) = shown {
+                log::warn!("notification {title:?} could not be shown: {err}");
+            }
         }
+    }
+
+    /// Show the "update applied" alert from `--updated-to` once, after the
+    /// tray work queued before it. It ignores the alert cooldown.
+    fn deliver_pending_update_alert(self: &Arc<Self>) {
+        let Some(alert) = self.with_state(|s| s.pending_update_alert.take()) else {
+            return;
+        };
+        let runtime = Arc::clone(self);
+        let dispatched = self
+            .ui
+            .app
+            .run_on_main_thread(move || runtime.deliver_alerts(vec![alert]));
+        if let Err(err) = dispatched {
+            log::warn!("update alert could not reach the main thread: {err}");
+        }
+    }
+
+    /// Run one menu command. The caller rebuilds the menus afterwards.
+    pub fn on_menu_command(self: &Arc<Self>, command: MenuCommand) {
+        log::debug!("menu command {}", command.id());
+        match command {
+            MenuCommand::Refresh => self.spawn_poll(),
+            MenuCommand::PollInterval(ms) => self.set_poll_interval(ms),
+            MenuCommand::ToggleProvider(provider) => self.toggle_provider(provider),
+            MenuCommand::Autostart => menu::toggle_autostart(&self.ui.app),
+            MenuCommand::ResetPosition => self.reset_positions(),
+            MenuCommand::VersionAction => self.check_for_updates(),
+            MenuCommand::UpdateInterval(secs) => self.set_update_interval(secs),
+            MenuCommand::SizeSmaller => self.resize_bubbles(-geom::RESIZE_STEP_LOGICAL),
+            MenuCommand::SizeLarger => self.resize_bubbles(geom::RESIZE_STEP_LOGICAL),
+            MenuCommand::SizeReset => self.set_bubble_size(DEFAULT_BUBBLE_SIZE),
+            MenuCommand::ToggleWidget => self.toggle_widget(),
+            MenuCommand::Restart => self.restart(),
+            MenuCommand::Exit => self.exit(),
+        }
+    }
+
+    /// Change a setting under the lock, then save a copy outside it.
+    fn update_settings<T>(&self, f: impl FnOnce(&mut Settings) -> T) -> T {
+        let (result, snapshot) = self.with_state(|s| {
+            let result = f(&mut s.settings);
+            (result, s.settings.clone())
+        });
+        if let Err(err) = settings::save(&snapshot) {
+            log::warn!("settings save failed: {err}");
+        }
+        result
+    }
+
+    fn set_poll_interval(&self, ms: u32) {
+        self.update_settings(|s| s.poll_interval_ms = ms);
+        self.send(Message::SetPollInterval(Duration::from_millis(u64::from(
+            ms,
+        ))));
+    }
+
+    fn set_update_interval(&self, interval_secs: Option<u64>) {
+        let last_check_unix = self.update_settings(|s| {
+            s.update_check_interval_secs = interval_secs;
+            s.last_update_check_unix
+        });
+        self.send(Message::SetUpdateInterval {
+            interval_secs,
+            last_check_unix,
+        });
+    }
+
+    /// Toggle a live provider, keeping at least one enabled, then create or
+    /// destroy its bubble, update the tray and poll.
+    fn toggle_provider(self: &Arc<Self>, provider: ProviderId) {
+        if !provider.metadata().live_usage {
+            return;
+        }
+        let enabled = self.update_settings(|s| s.toggle_live_provider(provider));
+        if enabled {
+            if let Err(err) = create_bubble_window(&self.ui.app, provider) {
+                log::error!("bubble for {} could not be created: {err}", provider.slug());
+            }
+        } else if let Some(window) = self.ui.app.get_webview_window(&bubble_label(provider)) {
+            if let Err(err) = window.destroy() {
+                log::warn!(
+                    "bubble for {} could not be destroyed: {err}",
+                    provider.slug()
+                );
+            }
+        }
+        self.propagate();
+        self.spawn_poll();
+    }
+
+    /// Show or hide every bubble and remember the choice.
+    pub fn toggle_widget(&self) {
+        let (visible, providers) = self.update_settings(|s| {
+            s.widget_visible = !s.widget_visible;
+            (s.widget_visible, enabled_live_providers(s))
+        });
+        for provider in providers {
+            let Some(window) = self.ui.app.get_webview_window(&bubble_label(provider)) else {
+                continue;
+            };
+            let result = if visible {
+                window.show()
+            } else {
+                window.hide()
+            };
+            if let Err(err) = result {
+                log::warn!("bubble for {} not toggled: {err}", provider.slug());
+            }
+        }
+    }
+
+    /// Forget the saved positions, push the cached state and poll.
+    fn reset_positions(self: &Arc<Self>) {
+        self.update_settings(|s| s.bubble_positions.reset_all());
+        self.propagate();
+        self.spawn_poll();
+    }
+
+    fn resize_bubbles(self: &Arc<Self>, delta: i32) {
+        let current = self.with_state(|s| s.settings.bubble_size_logical);
+        self.set_bubble_size(current.saturating_add(delta));
+    }
+
+    /// Clamp and store the bubble size; a no-op when it does not change.
+    fn set_bubble_size(self: &Arc<Self>, size_logical: i32) {
+        let size = size_logical.clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
+        let changed = self.with_state(|s| s.settings.bubble_size_logical != size);
+        if !changed {
+            return;
+        }
+        self.update_settings(|s| s.bubble_size_logical = size);
+        self.propagate();
     }
 
     /// Re-format the countdown texts after time passed and push them out.
@@ -275,8 +459,9 @@ impl Runtime {
         self.propagate();
     }
 
-    /// The automatic update check. No updater is registered in this build,
-    /// so the deadline stays disarmed until a check reports back.
+    /// The update check, automatic or from the menu. No updater is
+    /// registered in this build, so the deadline stays disarmed until a
+    /// check reports back.
     fn check_for_updates(&self) {
         log::debug!("update check due; no updater is registered");
     }
@@ -302,6 +487,7 @@ impl Runtime {
 
     /// End the process. The scheduler stops from the `Exit` run event.
     pub fn exit(&self) {
+        self.exiting.store(true, Ordering::Release);
         self.ui.app.exit(0);
     }
 }
@@ -425,16 +611,24 @@ pub fn run() {
         std::env::set_var("GDK_BACKEND", "x11");
     }
 
+    let autostart = tauri_plugin_autostart::Builder::new().app_name(AUTOSTART_NAME);
+    #[cfg(target_os = "macos")]
+    let autostart = autostart.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+
     let app = tauri::Builder::default()
         // First, so a second instance exits before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}))
+        .plugin(autostart.build())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             crate::commands::get_bubble_state,
             crate::commands::get_strings,
             crate::commands::log_js,
             crate::commands::bubble_ready,
+            crate::menu::show_context_menu,
         ])
         .on_window_event(on_window_event)
+        .on_menu_event(menu::on_menu_event)
         .setup(move |app| setup(app, &cli))
         .build(tauri::generate_context!());
 
@@ -453,6 +647,11 @@ pub fn run() {
         RunEvent::ExitRequested {
             code: None, api, ..
         } => api.prevent_exit(),
+        RunEvent::ExitRequested { .. } => {
+            if let Some(runtime) = app.try_state::<Arc<Runtime>>() {
+                runtime.exiting.store(true, Ordering::Release);
+            }
+        }
         RunEvent::Exit => {
             if let Some(runtime) = app.try_state::<Arc<Runtime>>() {
                 runtime.send(Message::Shutdown);
@@ -463,15 +662,45 @@ pub fn run() {
 }
 
 /// Bubbles ignore close requests (Alt+F4); they are only ever destroyed.
+/// A bubble destroyed while its provider is enabled again (a fast off/on
+/// toggle) is recreated once the old window is gone.
 fn on_window_event(window: &Window, event: &WindowEvent) {
-    if let WindowEvent::CloseRequested { api, .. } = event {
-        if window.label().starts_with(BUBBLE_LABEL_PREFIX) {
-            api.prevent_close();
+    let Some(slug) = window.label().strip_prefix(BUBBLE_LABEL_PREFIX) else {
+        return;
+    };
+    match event {
+        WindowEvent::CloseRequested { api, .. } => api.prevent_close(),
+        WindowEvent::Destroyed => {
+            let Some(provider) = ProviderId::from_slug(slug) else {
+                return;
+            };
+            let app = window.app_handle().clone();
+            let dispatched = window.run_on_main_thread(move || {
+                let Some(runtime) = app.try_state::<Arc<Runtime>>() else {
+                    return;
+                };
+                if runtime.exiting.load(Ordering::Acquire) {
+                    return;
+                }
+                let enabled = runtime.with_state(|s| s.settings.is_provider_enabled(provider));
+                if enabled && app.get_webview_window(&bubble_label(provider)).is_none() {
+                    if let Err(err) = create_bubble_window(&app, provider) {
+                        log::error!(
+                            "bubble for {slug} could not be recreated: {err}",
+                            slug = provider.slug()
+                        );
+                    }
+                }
+            });
+            if let Err(err) = dispatched {
+                log::warn!("bubble recreate check could not be queued: {err}");
+            }
         }
+        _ => {}
     }
 }
 
-fn setup(app: &mut App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
+fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
     let mut settings = settings::load();
     settings::drop_offscreen_positions(&mut settings, &monitor_rects(app.handle()));
     let is_dark = platform::system_is_dark();
@@ -493,10 +722,7 @@ fn setup(app: &mut App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
         update_interval_secs: state.settings.update_check_interval_secs,
         last_update_check_unix: state.settings.last_update_check_unix,
     };
-    let first_provider = enabled_live_providers(&state.settings)
-        .first()
-        .copied()
-        .unwrap_or(ProviderId::Claude);
+    let providers = enabled_live_providers(&state.settings);
 
     let (tx, rx) = mpsc::channel();
     let runtime = Arc::new(Runtime {
@@ -508,6 +734,9 @@ fn setup(app: &mut App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
         registry: Mutex::new(Registry::with_defaults()),
         poll_in_flight: AtomicBool::new(false),
         scheduler: tx,
+        trays: Trays::default(),
+        menu_cache: MenuCache::default(),
+        exiting: AtomicBool::new(false),
     });
     app.manage(Arc::clone(&runtime));
 
@@ -516,12 +745,42 @@ fn setup(app: &mut App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
         Err(err) => log::warn!("startup cleanup skipped, no executable path: {err}"),
     }
 
+    // Toasts from a portable exe need the app id registered first.
+    #[cfg(windows)]
+    register_notification_identity(app.handle());
+
     // The thread is detached; it stops on `Message::Shutdown` at exit.
     scheduler::spawn(config, rx, Arc::clone(&runtime))?;
     runtime.send(Message::PollNow);
 
-    create_test_window(app, first_provider)?;
+    for provider in providers {
+        create_bubble_window(app.handle(), provider)?;
+    }
+    runtime.refresh_shell(true);
+    runtime.deliver_pending_update_alert();
     Ok(())
+}
+
+/// Register the app id the notification plugin shows toasts under, with
+/// the app name and an icon PNG under the local data dir.
+#[cfg(windows)]
+fn register_notification_identity(app: &AppHandle) {
+    const ICON_PNG: &[u8] = include_bytes!("../icons/128x128.png");
+    let Some(icon_path) =
+        dirs::data_local_dir().map(|d| d.join(settings::APP_DIR_NAME).join("icon.png"))
+    else {
+        log::warn!("no local data dir; toasts may not show");
+        return;
+    };
+    let config = app.config();
+    let name = config
+        .product_name
+        .as_deref()
+        .unwrap_or("Claude Code Usage Bubble");
+    match platform::windows::register_aumid(&config.identifier, name, ICON_PNG, &icon_path) {
+        Ok(()) => log::info!("notification app id {} registered", config.identifier),
+        Err(err) => log::warn!("notification app id registration incomplete: {err}"),
+    }
 }
 
 /// Monitor rects in physical px. Empty when they cannot be enumerated,
@@ -548,19 +807,22 @@ fn monitor_rects(app: &AppHandle) -> Vec<Rect> {
     }
 }
 
-/// A plain window for the first enabled provider that renders its payload
-/// as JSON, standing in for the real bubble window.
-fn create_test_window(app: &App, provider: ProviderId) -> tauri::Result<()> {
-    WebviewWindowBuilder::new(
-        app,
-        bubble_label(provider),
-        WebviewUrl::App("bubble.html".into()),
-    )
-    .title("Claude Code Usage Bubble")
-    .inner_size(460.0, 420.0)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .build()?;
+/// A plain window for one provider that renders its payload as JSON,
+/// standing in for the real bubble window. Does nothing while a window
+/// with the label still exists; a destroyed one is recreated from its
+/// `Destroyed` event.
+fn create_bubble_window(app: &AppHandle, provider: ProviderId) -> tauri::Result<()> {
+    let label = bubble_label(provider);
+    if app.get_webview_window(&label).is_some() {
+        log::debug!("{label} still exists; not creating it again");
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(app, label, WebviewUrl::App("bubble.html".into()))
+        .title("Claude Code Usage Bubble")
+        .inner_size(460.0, 420.0)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .build()?;
     Ok(())
 }
 

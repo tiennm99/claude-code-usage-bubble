@@ -10,10 +10,12 @@ pub mod core;
 pub mod creds;
 pub mod diag;
 pub mod handoff;
+pub mod menu;
 pub mod net;
 pub mod platform;
 pub mod runtime;
 pub mod scheduler;
+pub mod tray;
 pub mod usage;
 
 /// Starts the application and blocks until it exits.
