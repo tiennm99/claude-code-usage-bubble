@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(windows)]
 pub mod windows;
 
@@ -73,6 +75,40 @@ pub fn system_is_dark() -> bool {
     #[cfg(not(windows))]
     {
         true
+    }
+}
+
+/// Whether the app can place its windows. False only under a native
+/// Wayland GTK backend (no Xwayland), where moves are ignored and positions
+/// read back as `(0, 0)`, so snapping, clamping and saving are skipped.
+pub fn positioning_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::positioning_supported(
+            std::env::var_os("WAYLAND_DISPLAY"),
+            std::env::var_os("GDK_BACKEND"),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Whether the primary mouse button is held right now, where the platform
+/// can tell; false otherwise.
+pub fn primary_button_down() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::button1_down()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::primary_button_down()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
     }
 }
 

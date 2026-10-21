@@ -3,11 +3,13 @@
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, State, WebviewWindow};
 
+use crate::bubble;
+use crate::core::geom::RESIZE_STEP_LOGICAL;
 use crate::core::i18n::LocaleStrings;
 use crate::core::payload::BubblePayload;
-use crate::runtime::{Runtime, BUBBLE_LABEL_PREFIX};
+use crate::runtime::Runtime;
 use crate::usage::ProviderId;
 
 /// Longest JS log message kept, in characters.
@@ -45,16 +47,43 @@ pub fn log_js(window: WebviewWindow, level: String, message: String) {
     }
 }
 
-/// The bubble rendered its first state and can be shown.
+/// The bubble rendered its first state and can be shown (unless hidden).
 #[tauri::command]
 pub fn bubble_ready(app: AppHandle, label: String) -> Result<(), String> {
-    if !label.starts_with(BUBBLE_LABEL_PREFIX) {
-        return Err("not a bubble window".into());
+    bubble::mark_ready(&app, &label)
+}
+
+/// A left click (a press released before the drag threshold) on a bubble.
+#[tauri::command]
+pub fn bubble_click(runtime: State<'_, Arc<Runtime>>, slug: String) -> Result<(), String> {
+    let provider = live_provider(&slug)?;
+    runtime.bubble_clicked(provider);
+    Ok(())
+}
+
+/// The page is about to start an OS drag of a bubble.
+#[tauri::command]
+pub fn bubble_drag_start(app: AppHandle, slug: String) -> Result<(), String> {
+    let provider = live_provider(&slug)?;
+    bubble::drag_start(&app, provider);
+    Ok(())
+}
+
+/// Ctrl+wheel on a bubble: `dir` 1 grows every bubble one step, -1 shrinks.
+#[tauri::command]
+pub fn bubble_resize_step(runtime: State<'_, Arc<Runtime>>, dir: i32) -> Result<(), String> {
+    let delta = resize_delta(dir)?;
+    runtime.resize_bubbles(delta);
+    Ok(())
+}
+
+/// The size change for a resize direction; only 1 and -1 are accepted.
+fn resize_delta(dir: i32) -> Result<i32, String> {
+    match dir {
+        1 => Ok(RESIZE_STEP_LOGICAL),
+        -1 => Ok(-RESIZE_STEP_LOGICAL),
+        _ => Err("resize direction must be 1 or -1".into()),
     }
-    let window = app
-        .get_webview_window(&label)
-        .ok_or_else(|| "no such bubble window".to_string())?;
-    window.show().map_err(|err| err.to_string())
 }
 
 fn live_provider(slug: &str) -> Result<ProviderId, String> {
@@ -84,6 +113,15 @@ mod tests {
         assert!(live_provider("opencode-go").is_err());
         assert!(live_provider("").is_err());
         assert!(live_provider("CLAUDE").is_err());
+    }
+
+    #[test]
+    fn resize_steps_are_one_step_either_way() {
+        assert_eq!(resize_delta(1), Ok(20));
+        assert_eq!(resize_delta(-1), Ok(-20));
+        assert!(resize_delta(0).is_err());
+        assert!(resize_delta(2).is_err());
+        assert!(resize_delta(i32::MIN).is_err());
     }
 
     #[test]

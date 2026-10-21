@@ -15,9 +15,8 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use tauri::{
-    AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
-};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::cli::{self, CliArgs};
@@ -27,14 +26,18 @@ use crate::core::menu_model::MenuCommand;
 use crate::core::payload::{self, BubblePayload, Canvas};
 use crate::core::settings::{self, Settings};
 use crate::core::state::{Alert, PollOutcome, UpdateStatus, UsageState};
+use crate::core::visibility::{self, Visibility};
 use crate::menu::{self, MenuCache, MenuSnapshot};
 use crate::scheduler::{self, Action, Message, SchedulerHost};
 use crate::tray::{self, Trays};
 use crate::usage::{self, refresh, ProviderId, Registry};
-use crate::{diag, handoff, net, platform};
+use crate::{bubble, diag, handoff, net, platform};
 
 /// Event carrying a [`BubblePayload`] to a bubble webview.
 pub const BUBBLE_UPDATE_EVENT: &str = "bubble:update";
+
+/// Event telling every webview the system theme changed.
+pub const THEME_EVENT: &str = "theme";
 
 /// Label prefix of every bubble window.
 pub const BUBBLE_LABEL_PREFIX: &str = "bubble-";
@@ -64,6 +67,8 @@ pub struct AppState {
     pub settings: Settings,
     pub strings: LocaleStrings,
     pub is_dark: bool,
+    /// Why the bubbles are hidden, if they are.
+    pub visibility: Visibility,
     pub usage: UsageState,
     pub update_status: UpdateStatus,
     /// The "update applied" alert from `--updated-to`, shown once the
@@ -109,6 +114,13 @@ impl UiBridge {
             log::warn!("bubble update could not reach the main thread: {err}");
         }
     }
+}
+
+/// Payload of [`THEME_EVENT`].
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThemePayload {
+    is_dark: bool,
 }
 
 /// An owned copy of what the bubble payloads need.
@@ -197,6 +209,26 @@ impl Runtime {
         self.ui.emit_bubble_updates(snapshot);
         self.refresh_shell(false);
         self.send(Message::RecomputeCountdown(countdown));
+    }
+
+    /// Send every bubble its payload, sized for its current window.
+    pub fn push_bubbles(&self) {
+        let snapshot = self.with_state(|s| BubbleSnapshot::of(s));
+        self.ui.emit_bubble_updates(snapshot);
+    }
+
+    /// Record the system theme. A change reaches every open webview at
+    /// once and is followed by fresh payloads, whose fills depend on it.
+    pub fn set_dark(&self, is_dark: bool) {
+        let changed = self.with_state(|s| std::mem::replace(&mut s.is_dark, is_dark) != is_dark);
+        if !changed {
+            return;
+        }
+        log::info!("theme is now {}", if is_dark { "dark" } else { "light" });
+        if let Err(err) = self.ui.app.emit(THEME_EVENT, ThemePayload { is_dark }) {
+            log::warn!("emit {THEME_EVENT} failed: {err}");
+        }
+        self.propagate();
     }
 
     /// Bring the tray icons in line with state and rebuild their menus when
@@ -395,7 +427,7 @@ impl Runtime {
         }
         let enabled = self.update_settings(|s| s.toggle_live_provider(provider));
         if enabled {
-            spawn_bubble_window(&self.ui.app, provider);
+            bubble::spawn_create(&self.ui.app, provider);
         } else if let Some(window) = self.ui.app.get_webview_window(&bubble_label(provider)) {
             if let Err(err) = window.destroy() {
                 log::warn!(
@@ -410,46 +442,78 @@ impl Runtime {
 
     /// Show or hide every bubble and remember the choice.
     pub fn toggle_widget(&self) {
-        let (visible, providers) = self.update_settings(|s| {
-            s.widget_visible = !s.widget_visible;
-            (s.widget_visible, enabled_live_providers(s))
+        let event = if self.with_state(|s| s.visibility.user_hidden) {
+            visibility::Event::UserShow
+        } else {
+            visibility::Event::UserHide
+        };
+        self.apply_visibility(event);
+    }
+
+    /// Apply a visibility event to every bubble. A user show or hide is
+    /// also saved as `widget_visible`.
+    pub fn apply_visibility(&self, event: visibility::Event) {
+        let (action, saved) = self.with_state(|s| {
+            let (next, action) = visibility::next(s.visibility, event);
+            s.visibility = next;
+            let user_event = matches!(
+                event,
+                visibility::Event::UserShow | visibility::Event::UserHide
+            );
+            let saved = user_event.then(|| {
+                s.settings.widget_visible = !next.user_hidden;
+                s.settings.clone()
+            });
+            (action, saved)
         });
-        for provider in providers {
-            let Some(window) = self.ui.app.get_webview_window(&bubble_label(provider)) else {
-                continue;
-            };
-            let result = if visible {
-                window.show()
-            } else {
-                window.hide()
-            };
-            if let Err(err) = result {
-                log::warn!("bubble for {} not toggled: {err}", provider.slug());
+        if let Some(snapshot) = saved {
+            if let Err(err) = settings::save(&snapshot) {
+                log::warn!("settings save failed: {err}");
             }
+        }
+        if let Some(action) = action {
+            log::debug!("bubbles {action:?} after {event:?}");
+            bubble::apply(&self.ui.app, action);
         }
     }
 
-    /// Forget the saved positions, push the cached state and poll.
+    /// Forget the saved positions, move the bubbles to their default spots,
+    /// push the cached state and poll.
     fn reset_positions(self: &Arc<Self>) {
         self.update_settings(|s| s.bubble_positions.reset_all());
+        bubble::move_all_to_defaults(&self.ui.app);
         self.propagate();
         self.spawn_poll();
     }
 
-    fn resize_bubbles(self: &Arc<Self>, delta: i32) {
+    /// Save where the user dropped a bubble.
+    pub fn save_bubble_position(&self, provider: ProviderId, pos: (i32, i32)) {
+        self.update_settings(|s| s.bubble_positions.set(provider, pos));
+    }
+
+    /// Grow or shrink the bubbles by `delta` logical px.
+    pub fn resize_bubbles(self: &Arc<Self>, delta: i32) {
         let current = self.with_state(|s| s.settings.bubble_size_logical);
         self.set_bubble_size(current.saturating_add(delta));
     }
 
-    /// Clamp and store the bubble size; a no-op when it does not change.
-    fn set_bubble_size(self: &Arc<Self>, size_logical: i32) {
+    /// Clamp and store the bubble size, then resize every bubble around its
+    /// centre (no snap, no position save); a no-op when it does not change.
+    pub fn set_bubble_size(self: &Arc<Self>, size_logical: i32) {
         let size = size_logical.clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
         let changed = self.with_state(|s| s.settings.bubble_size_logical != size);
         if !changed {
             return;
         }
         self.update_settings(|s| s.bubble_size_logical = size);
+        bubble::resize_all(&self.ui.app, size);
         self.propagate();
+    }
+
+    /// A left click on a bubble. The details panel does not exist yet, so
+    /// the click is only logged.
+    pub fn bubble_clicked(&self, provider: ProviderId) {
+        log::debug!("bubble click on {}; no details panel yet", provider.slug());
     }
 
     /// Re-format the countdown texts after time passed and push them out.
@@ -482,6 +546,11 @@ impl Runtime {
         if let Err(err) = self.relaunch_and_exit(&[]) {
             log::error!("restart: relaunch failed, keeping this instance: {err}");
         }
+    }
+
+    /// Whether the process is shutting down.
+    pub fn is_exiting(&self) -> bool {
+        self.exiting.load(Ordering::Acquire)
     }
 
     /// End the process. The scheduler stops from the `Exit` run event.
@@ -540,13 +609,18 @@ pub fn enabled_live_providers(settings: &Settings) -> Vec<ProviderId> {
         .collect()
 }
 
-/// The bubble canvas in physical px for a window scale factor.
-pub fn bubble_canvas(size_logical: i32, scale_factor: f64) -> Canvas {
-    let dpi = if scale_factor.is_finite() && scale_factor > 0.0 {
+/// The DPI for a window or monitor scale factor; 96 for a bad factor.
+pub fn dpi_for_scale(scale_factor: f64) -> u32 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
         (scale_factor * f64::from(geom::BASE_DPI)).round() as u32
     } else {
         geom::BASE_DPI
-    };
+    }
+}
+
+/// The bubble canvas in physical px for a window scale factor.
+pub fn bubble_canvas(size_logical: i32, scale_factor: f64) -> Canvas {
+    let dpi = dpi_for_scale(scale_factor);
     let (w, h) = geom::bubble_size_px(size_logical, dpi);
     Canvas {
         w: u32::try_from(w).unwrap_or(1),
@@ -630,9 +704,12 @@ pub fn run() {
             crate::commands::get_strings,
             crate::commands::log_js,
             crate::commands::bubble_ready,
+            crate::commands::bubble_click,
+            crate::commands::bubble_drag_start,
+            crate::commands::bubble_resize_step,
             crate::menu::show_context_menu,
         ])
-        .on_window_event(on_window_event)
+        .on_window_event(bubble::on_window_event)
         .on_menu_event(menu::on_menu_event)
         .on_tray_icon_event(tray::on_tray_icon_event)
         .setup(move |app| setup(app, &cli))
@@ -667,35 +744,6 @@ pub fn run() {
     });
 }
 
-/// Bubbles ignore close requests (Alt+F4); they are only ever destroyed.
-/// A bubble destroyed while its provider is enabled again (a fast off/on
-/// toggle) is recreated once the old window is gone.
-fn on_window_event(window: &Window, event: &WindowEvent) {
-    let Some(slug) = window.label().strip_prefix(BUBBLE_LABEL_PREFIX) else {
-        return;
-    };
-    match event {
-        WindowEvent::CloseRequested { api, .. } => api.prevent_close(),
-        WindowEvent::Destroyed => {
-            let Some(provider) = ProviderId::from_slug(slug) else {
-                return;
-            };
-            let Some(runtime) = window.try_state::<Arc<Runtime>>() else {
-                return;
-            };
-            if runtime.exiting.load(Ordering::Acquire) {
-                return;
-            }
-            // The old window is already out of the manager here, so the
-            // existence check in `create_bubble_window` sees it gone.
-            if runtime.with_state(|s| s.settings.is_provider_enabled(provider)) {
-                spawn_bubble_window(window.app_handle(), provider);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
     let mut settings = settings::load();
     settings::drop_offscreen_positions(&mut settings, &monitor_rects(app.handle()));
@@ -705,6 +753,7 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
     let state = AppState {
         strings: I18n::load().strings().clone(),
         is_dark,
+        visibility: Visibility::from_widget_visible(settings.widget_visible),
         usage: UsageState::default(),
         update_status: UpdateStatus::Idle,
         pending_update_alert: cli
@@ -750,7 +799,7 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
     runtime.send(Message::PollNow);
 
     for provider in providers {
-        create_bubble_window(app.handle(), provider)?;
+        bubble::create(app.handle(), provider)?;
     }
     runtime.refresh_shell(true);
     runtime.deliver_pending_update_alert();
@@ -803,50 +852,6 @@ fn monitor_rects(app: &AppHandle) -> Vec<Rect> {
     }
 }
 
-/// A plain window for one provider that renders its payload as JSON,
-/// standing in for the real bubble window. Does nothing while a window
-/// with the label still exists; a destroyed one is recreated from its
-/// `Destroyed` event.
-/// Create a bubble from a short-lived thread. Building a webview window
-/// inside a menu or window event handler deadlocks on Windows (WebView2),
-/// while off the main thread the build is posted to the event loop. The
-/// lock makes a toggle and a `Destroyed` recreate for the same provider
-/// check and build one at a time, so only one of them creates the window.
-/// The main thread never takes it.
-fn spawn_bubble_window(app: &AppHandle, provider: ProviderId) {
-    static CREATE: Mutex<()> = Mutex::new(());
-    let app = app.clone();
-    let spawned = std::thread::Builder::new()
-        .name("bubble-create".into())
-        .spawn(move || {
-            let _serial = CREATE.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Err(err) = create_bubble_window(&app, provider) {
-                log::error!("bubble for {} could not be created: {err}", provider.slug());
-            }
-        });
-    if let Err(err) = spawned {
-        log::error!(
-            "bubble for {} not created, no thread: {err}",
-            provider.slug()
-        );
-    }
-}
-
-fn create_bubble_window(app: &AppHandle, provider: ProviderId) -> tauri::Result<()> {
-    let label = bubble_label(provider);
-    if app.get_webview_window(&label).is_some() {
-        log::debug!("{label} still exists; not creating it again");
-        return Ok(());
-    }
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App("bubble.html".into()))
-        .title("Claude Code Usage Bubble")
-        .inner_size(460.0, 420.0)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .build()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,6 +892,8 @@ mod tests {
         assert_eq!(bubble_canvas(200, 1.25).dpi, 120);
         assert_eq!(bubble_canvas(200, f64::NAN).dpi, 96);
         assert_eq!(bubble_canvas(200, 0.0).dpi, 96);
+        assert_eq!(dpi_for_scale(1.75), 168);
+        assert_eq!(dpi_for_scale(-1.0), 96);
     }
 
     #[test]
@@ -931,6 +938,7 @@ mod tests {
             settings: Settings::default(),
             strings: I18n::load().strings().clone(),
             is_dark: true,
+            visibility: Visibility::default(),
             usage: UsageState::default(),
             update_status: UpdateStatus::Idle,
             pending_update_alert: None,

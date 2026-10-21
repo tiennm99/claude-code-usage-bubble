@@ -4,6 +4,7 @@
 //! that items wired up incrementally do not trip `dead_code`.
 
 pub mod badge;
+pub mod bubble;
 pub mod cli;
 pub mod commands;
 pub mod core;
