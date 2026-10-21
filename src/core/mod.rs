@@ -5,6 +5,7 @@ pub mod geom;
 pub mod i18n;
 pub mod menu_model;
 pub mod payload;
+pub mod proxy;
 pub mod settings;
 pub mod state;
 pub mod usage_color;

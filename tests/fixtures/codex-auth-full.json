@@ -1,0 +1,10 @@
+{
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "fixture-id-token",
+    "access_token": "fixture-access-token",
+    "refresh_token": "fixture-refresh-token",
+    "account_id": "fixture-account"
+  },
+  "last_refresh": "2025-10-21T10:00:00Z"
+}

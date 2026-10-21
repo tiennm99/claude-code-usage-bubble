@@ -62,10 +62,57 @@ pub(crate) fn parse_claude_json(content: &str) -> Result<super::Token, super::Er
         .and_then(|v| v.as_str())
         .ok_or(super::Error::MissingField("accessToken"))?
         .to_string();
-    let expires_at_unix_ms = oauth.get("expiresAt").and_then(|v| v.as_i64());
+    // The CLI writes integer milliseconds; a float is truncated rather than
+    // dropped, so a client-side expiry check still runs.
+    let expires_at_unix_ms = oauth
+        .get("expiresAt")
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)));
     Ok(super::Token {
         access_token,
         expires_at_unix_ms,
         account_id: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::creds::Error;
+
+    fn fixture(name: &str) -> String {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    }
+
+    #[test]
+    fn full_credentials_read_token_and_expiry() {
+        let token = parse_claude_json(&fixture("claude-credentials-full.json")).expect("token");
+        assert_eq!(token.access_token, "sk-ant-oat01-fixture");
+        assert_eq!(token.expires_at_unix_ms, Some(1_761_040_800_000));
+        assert_eq!(token.account_id, None);
+    }
+
+    #[test]
+    fn float_expiry_is_truncated_to_milliseconds() {
+        let token =
+            parse_claude_json(&fixture("claude-credentials-float-expiry.json")).expect("token");
+        assert_eq!(token.expires_at_unix_ms, Some(1_761_040_800_000));
+    }
+
+    #[test]
+    fn missing_expiry_is_none() {
+        let token = parse_claude_json(r#"{"claudeAiOauth":{"accessToken":"t","expiresAt":null}}"#)
+            .expect("token");
+        assert_eq!(token.expires_at_unix_ms, None);
+    }
+
+    #[test]
+    fn missing_fields_are_reported() {
+        let err = parse_claude_json(&fixture("claude-credentials-missing-token.json")).unwrap_err();
+        assert!(matches!(err, Error::MissingField("accessToken")), "{err}");
+        let err = parse_claude_json(&fixture("claude-credentials-missing-oauth.json")).unwrap_err();
+        assert!(matches!(err, Error::MissingField("claudeAiOauth")), "{err}");
+        let err = parse_claude_json("not json").unwrap_err();
+        assert!(matches!(err, Error::Json(_)), "{err}");
+    }
 }

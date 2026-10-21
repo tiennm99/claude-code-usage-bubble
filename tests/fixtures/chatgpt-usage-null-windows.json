@@ -1,0 +1,7 @@
+{
+  "rate_limit": {
+    "allowed": true,
+    "primary_window": { "used_percent": 55.0, "reset_at": 1761040800 },
+    "secondary_window": null
+  }
+}

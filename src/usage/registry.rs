@@ -4,9 +4,9 @@
 // every cycle. The result is a flat list of `(id, Result<UsageWindows>)`
 // pairs the app can apply to its state.
 
+use crate::core::settings::Settings;
 use crate::creds::Locator;
 use crate::net::Client;
-use crate::settings::Settings;
 use crate::usage::{
     anthropic::ClaudeProvider, chatgpt::ChatGptProvider, refresh, Error, ProviderId, UsageProvider,
     UsageWindows,
@@ -72,5 +72,51 @@ impl Registry {
         sigs.sort();
         sigs.dedup();
         sigs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::USER_AGENT;
+
+    #[test]
+    fn live_usage_excludes_opencode_go() {
+        // `poll_enabled` relies on this for its `unreachable!` arm.
+        assert!(!ProviderId::LIVE_USAGE.contains(&ProviderId::OpenCodeGo));
+        for provider in ProviderId::ALL {
+            assert_eq!(
+                ProviderId::LIVE_USAGE.contains(&provider),
+                provider.metadata().live_usage
+            );
+        }
+    }
+
+    /// Polls the real providers with the credentials on this machine. Run by
+    /// hand: `cargo test -- --ignored live_poll --nocapture`.
+    #[test]
+    #[ignore = "talks to the real provider endpoints"]
+    fn live_poll() {
+        let http = Client::new(USER_AGENT).expect("client");
+        let mut settings = Settings::default();
+        for provider in ProviderId::ALL {
+            settings.set_provider_enabled(provider, true);
+        }
+        let mut registry = Registry::with_defaults();
+        let results = registry.poll_enabled(&http, &settings);
+        assert_eq!(results.len(), ProviderId::LIVE_USAGE.len());
+        for (provider, result) in results {
+            match result {
+                Ok(w) => println!(
+                    "{}: 5h {:.1}% resets {:?}, weekly {:.1}% resets {:?}",
+                    provider.slug(),
+                    w.primary.utilization,
+                    w.primary.resets_at,
+                    w.secondary.utilization,
+                    w.secondary.resets_at
+                ),
+                Err(err) => println!("{}: {err}", provider.slug()),
+            }
+        }
     }
 }

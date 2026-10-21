@@ -125,3 +125,52 @@ impl<T> FlattenBoxed<T> for Option<Option<Box<T>>> {
         self.and_then(|inner| inner.map(|b| *b))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(secs: u64) -> Option<SystemTime> {
+        Some(UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    fn envelope(name: &str) -> Envelope {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        serde_json::from_str(&text).expect("fixture parses")
+    }
+
+    #[test]
+    fn full_envelope_maps_both_windows() {
+        let w = envelope_to_windows(envelope("chatgpt-usage-full.json")).expect("rate_limit");
+        assert_eq!(w.primary.utilization, 12.0);
+        assert_eq!(w.primary.resets_at, at(1_761_040_800));
+        assert_eq!(w.secondary.utilization, 100.0, "clamped to 100");
+        assert_eq!(w.secondary.resets_at, at(1_761_508_800));
+    }
+
+    #[test]
+    fn null_rate_limit_is_a_bad_response() {
+        assert!(envelope_to_windows(envelope("chatgpt-usage-null-rate-limit.json")).is_none());
+        let missing: Envelope = serde_json::from_str("{}").expect("parses");
+        assert!(envelope_to_windows(missing).is_none());
+    }
+
+    #[test]
+    fn null_window_defaults_to_empty() {
+        let w =
+            envelope_to_windows(envelope("chatgpt-usage-null-windows.json")).expect("rate_limit");
+        assert_eq!(w.primary.utilization, 55.0);
+        assert_eq!(w.secondary.utilization, 0.0);
+        assert_eq!(w.secondary.resets_at, None);
+    }
+
+    #[test]
+    fn negative_reset_has_no_reset_time_and_percent_is_clamped() {
+        let w =
+            envelope_to_windows(envelope("chatgpt-usage-negative-reset.json")).expect("rate_limit");
+        assert_eq!(w.primary.utilization, 0.0);
+        assert_eq!(w.primary.resets_at, None);
+        assert_eq!(w.secondary.resets_at, at(0));
+    }
+}

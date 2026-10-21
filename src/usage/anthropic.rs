@@ -17,10 +17,7 @@ const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const BETA_HEADER: &str = "oauth-2025-04-20";
 const API_VERSION: &str = "2023-06-01";
 
-const PROBE_MODELS: &[&str] = &[
-    "claude-3-haiku-20240307",
-    "claude-haiku-4-5-20251001",
-];
+const PROBE_MODELS: &[&str] = &["claude-3-haiku-20240307", "claude-haiku-4-5-20251001"];
 
 pub struct ClaudeProvider {
     locator: Locator,
@@ -86,13 +83,16 @@ fn try_usage_endpoint(http: &Client, token: &str) -> Result<Option<UsageWindows>
     if !(200..300).contains(&resp.status()) {
         return Ok(None);
     }
-    let body: OauthUsage = match resp.json() {
-        Ok(b) => b,
-        Err(_) => return Ok(None),
-    };
+    Ok(parse_usage_body(resp.body()))
+}
+
+/// Windows from an `/api/oauth/usage` body, or `None` when the body does not
+/// match the expected shape (which sends the caller to the Messages fallback).
+fn parse_usage_body(body: &[u8]) -> Option<UsageWindows> {
+    let body: OauthUsage = serde_json::from_slice(body).ok()?;
     let primary = body.five_hour.map(bucket_to_window).unwrap_or_default();
     let secondary = body.seven_day.map(bucket_to_window).unwrap_or_default();
-    Ok(Some(UsageWindows { primary, secondary }))
+    Some(UsageWindows { primary, secondary })
 }
 
 fn try_messages_endpoint(http: &Client, token: &str) -> Result<UsageWindows, Error> {
@@ -120,8 +120,12 @@ fn try_messages_endpoint(http: &Client, token: &str) -> Result<UsageWindows, Err
             return Err(Error::AuthRequired);
         }
         // Even an error response from Messages can carry rate-limit headers.
-        if resp.header("anthropic-ratelimit-unified-5h-utilization").is_some()
-            || resp.header("anthropic-ratelimit-unified-7d-utilization").is_some()
+        if resp
+            .header("anthropic-ratelimit-unified-5h-utilization")
+            .is_some()
+            || resp
+                .header("anthropic-ratelimit-unified-7d-utilization")
+                .is_some()
         {
             return Ok(headers::parse_anthropic(&resp));
         }
@@ -240,7 +244,7 @@ fn parse_iso8601(s: &str) -> Option<SystemTime> {
 }
 
 fn is_leap(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // --- JSON shape ---
@@ -255,4 +259,126 @@ struct OauthUsage {
 struct Bucket {
     utilization: f64,
     resets_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(secs: u64) -> Option<SystemTime> {
+        Some(UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    }
+
+    #[test]
+    fn full_usage_body_maps_both_buckets() {
+        let w = parse_usage_body(&fixture("anthropic-usage-full.json")).expect("parses");
+        assert_eq!(w.primary.utilization, 42.5);
+        assert_eq!(w.primary.resets_at, at(1_761_040_800));
+        assert_eq!(w.secondary.utilization, 100.0, "clamped to 100");
+        assert_eq!(w.secondary.resets_at, at(1_761_508_800));
+        assert!(has_reset_times(&w));
+    }
+
+    #[test]
+    fn partial_usage_body_keeps_percentages_and_merges_fallback_resets() {
+        let w = parse_usage_body(&fixture("anthropic-usage-partial.json")).expect("parses");
+        assert_eq!(w.primary.utilization, 7.0);
+        assert_eq!(w.primary.resets_at, None);
+        assert_eq!(w.secondary.resets_at, at(1_709_251_199));
+        assert!(!has_reset_times(&w));
+
+        let fallback = UsageWindows {
+            primary: Window {
+                utilization: 99.0,
+                resets_at: at(10),
+            },
+            secondary: Window {
+                utilization: 99.0,
+                resets_at: at(20),
+            },
+        };
+        let merged = merge_resets(w, fallback);
+        assert_eq!(merged.primary.utilization, 7.0, "percent is not replaced");
+        assert_eq!(merged.primary.resets_at, at(10));
+        assert_eq!(merged.secondary.resets_at, at(1_709_251_199));
+    }
+
+    #[test]
+    fn missing_bucket_defaults_to_empty_window() {
+        let w = parse_usage_body(&fixture("anthropic-usage-five-hour-only.json")).expect("parses");
+        assert_eq!(w.primary.utilization, 3.0);
+        assert_eq!(w.secondary.utilization, 0.0);
+        assert_eq!(w.secondary.resets_at, None);
+    }
+
+    #[test]
+    fn null_buckets_parse_as_empty_windows() {
+        let w = parse_usage_body(&fixture("anthropic-usage-null-buckets.json")).expect("parses");
+        assert_eq!(w.primary.utilization, 0.0);
+        assert_eq!(w.secondary.utilization, 0.0);
+        assert!(!has_reset_times(&w));
+    }
+
+    #[test]
+    fn null_utilization_rejects_body_so_fallback_runs() {
+        assert!(parse_usage_body(&fixture("anthropic-usage-null-utilization.json")).is_none());
+        assert!(parse_usage_body(b"not json").is_none());
+    }
+
+    #[test]
+    fn iso8601_accepts_utc_offsets_and_fractions() {
+        assert_eq!(parse_iso8601("2025-10-21T10:00:00Z"), at(1_761_040_800));
+        assert_eq!(
+            parse_iso8601("2025-10-21T10:00:00.999999+00:00"),
+            at(1_761_040_800)
+        );
+        assert_eq!(
+            parse_iso8601("2025-10-27T03:00:00+07:00"),
+            at(1_761_508_800)
+        );
+        assert_eq!(
+            parse_iso8601("2025-10-21T05:30:00-04:30"),
+            at(1_761_040_800)
+        );
+        assert_eq!(parse_iso8601("2025-10-21T10:00:00"), at(1_761_040_800));
+        assert_eq!(parse_iso8601("2024-02-29T23:59:59Z"), at(1_709_251_199));
+        assert_eq!(parse_iso8601("1970-01-01T00:00:00Z"), at(0));
+    }
+
+    #[test]
+    fn iso8601_rejects_malformed_values() {
+        assert_eq!(
+            parse_iso8601("2025-10-21T10:00:00+0000"),
+            None,
+            "colonless offset"
+        );
+        assert_eq!(parse_iso8601("2025-10-21t10:00:00Z"), None, "lowercase t");
+        assert_eq!(parse_iso8601("1969-12-31T23:59:59Z"), None, "before 1970");
+        assert_eq!(
+            parse_iso8601("1970-01-01T00:30:00+01:00"),
+            None,
+            "negative epoch"
+        );
+        assert_eq!(
+            parse_iso8601("2025-02-29T00:00:00Z"),
+            None,
+            "not a leap year"
+        );
+        assert_eq!(parse_iso8601("2025-13-01T00:00:00Z"), None);
+        assert_eq!(parse_iso8601("2025-10-21 10:00:00Z"), None);
+        assert_eq!(parse_iso8601("2025-10-21T10:00Z"), None);
+        assert_eq!(parse_iso8601(""), None);
+    }
+
+    #[test]
+    fn token_expiry_compares_milliseconds() {
+        assert!(!token_is_expired(None));
+        assert!(token_is_expired(Some(0)));
+        assert!(!token_is_expired(Some(i64::MAX)));
+    }
 }

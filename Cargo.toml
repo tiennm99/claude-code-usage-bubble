@@ -19,7 +19,8 @@ path = "src/main.rs"
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2"
-ureq = "3"
+# rustls with the OS verifier keeps corporate roots trusted; gzip is a default.
+ureq = { version = "3", features = ["platform-verifier"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
@@ -51,6 +52,11 @@ windows = { version = "0.62", features = [
 ] }
 # Same major as tauri's; used for the WebView2 runtime check.
 webview2-com = "0.39"
+# Same major as the copy auto-launch pulls; reads the system proxy.
+windows-registry = "0.6"
+
+[dev-dependencies]
+flate2 = "1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

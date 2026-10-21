@@ -4,7 +4,10 @@
 //! that items wired up incrementally do not trip `dead_code`.
 
 pub mod core;
+pub mod creds;
 pub mod diag;
+pub mod net;
+pub mod platform;
 pub mod usage;
 
 use tauri::{RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
