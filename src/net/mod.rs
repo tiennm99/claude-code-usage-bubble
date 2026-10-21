@@ -48,15 +48,74 @@ impl From<http::Error> for Error {
     }
 }
 
-/// The static system proxy that applies when no environment proxy is set.
+/// Proxy variables in the order `ureq` reads them; the first usable one wins.
+const ENV_PROXY_VARS: &[&str] = &[
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+];
+
+/// The environment proxy, if one is usable.
 ///
-/// Environment proxies (`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, …) are read by
-/// `ureq` itself and win over the system proxy. On Windows the fallback is the
-/// `Internet Settings` proxy; other platforms have none.
-pub fn system_proxy() -> Option<SystemProxy> {
-    if Proxy::try_from_env().is_some() {
-        return None;
+/// Walks the variables `ureq` reads, but skips SOCKS entries: this build has no
+/// `socks-proxy` support, so `ureq` would either fail every request (`socks5h`)
+/// or silently connect directly (`socks5`). Proxy tools often set
+/// `ALL_PROXY=socks5h://…` next to `HTTPS_PROXY=http://…`, so skipping lets the
+/// HTTP entry, or failing that the system proxy, take over. `NO_PROXY` applies
+/// to the chosen proxy.
+pub fn env_proxy() -> Option<Proxy> {
+    env_proxy_from(|name| std::env::var(name).ok())
+}
+
+fn env_proxy_from(var: impl Fn(&str) -> Option<String>) -> Option<Proxy> {
+    let no_proxy = var("NO_PROXY").or_else(|| var("no_proxy"));
+    for name in ENV_PROXY_VARS {
+        let Some(value) = var(name) else { continue };
+        // Invalid values are skipped, as `ureq` does. Values are not logged:
+        // they may carry credentials.
+        let Ok(parsed) = Proxy::new(&value) else {
+            continue;
+        };
+        if !is_connect_proxy(&parsed) {
+            log::warn!("{name} ignored, only http and https proxies are supported");
+            continue;
+        }
+        // Rebuild so the proxy carries the `NO_PROXY` bypass list, which only
+        // the builder accepts.
+        let mut builder = Proxy::builder(parsed.protocol())
+            .host(parsed.host())
+            .port(parsed.port());
+        if let Some(user) = parsed.username() {
+            builder = builder.username(user);
+        }
+        if let Some(password) = parsed.password() {
+            builder = builder.password(password);
+        }
+        for expr in no_proxy.iter().flat_map(|v| v.split(',')) {
+            let expr = expr.trim();
+            if !expr.is_empty() {
+                builder = builder.no_proxy(expr);
+            }
+        }
+        match builder.build() {
+            Ok(proxy) => return Some(proxy),
+            Err(err) => log::warn!("{name} ignored, it is not a valid proxy URI: {err}"),
+        }
     }
+    None
+}
+
+/// Whether `proxy` is an HTTP CONNECT proxy, the only kind this build supports.
+fn is_connect_proxy(proxy: &Proxy) -> bool {
+    matches!(proxy.protocol(), ProxyProtocol::Http | ProxyProtocol::Https)
+}
+
+/// The static system proxy: the `Internet Settings` proxy on Windows, none
+/// elsewhere. It applies only when [`env_proxy`] finds nothing.
+pub fn system_proxy() -> Option<SystemProxy> {
     #[cfg(windows)]
     {
         crate::platform::windows::system_proxy()
@@ -82,7 +141,9 @@ pub struct Client {
 impl Client {
     /// Create a client whose default User-Agent is `user_agent`.
     pub fn new(user_agent: &str) -> Result<Self, Error> {
-        Self::build(user_agent, Proxy::try_from_env(), system_proxy())
+        let env = env_proxy();
+        let system = if env.is_some() { None } else { system_proxy() };
+        Self::build(user_agent, env, system)
     }
 
     /// A client that ignores every proxy, for loopback tests.
@@ -102,7 +163,7 @@ impl Client {
                 // Without ureq's `socks-proxy` feature a manually configured
                 // SOCKS proxy panics at connect time, so only CONNECT proxies
                 // are accepted here.
-                Ok(p) if !matches!(p.protocol(), ProxyProtocol::Http | ProxyProtocol::Https) => {
+                Ok(p) if !is_connect_proxy(&p) => {
                     log::warn!("system proxy ignored, only http and https proxies are supported");
                     None
                 }
@@ -431,6 +492,60 @@ mod tests {
         )
         .expect("client");
         assert_eq!(client.system_proxy(), None);
+    }
+
+    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn socks_env_proxy_is_skipped_for_the_http_one() {
+        let proxy = serve_once("200 OK", &[], Vec::new());
+        let origin = serve_once("200 OK", &[], Vec::new());
+        let chosen = env_proxy_from(env(&[
+            ("all_proxy", "socks5h://127.0.0.1:9"),
+            ("https_proxy", &proxy.base),
+        ]))
+        .expect("http env proxy");
+        assert_eq!(chosen.protocol(), ProxyProtocol::Http);
+
+        let client = Client::build(USER_AGENT, Some(chosen), None).expect("client");
+        // The fake proxy does not tunnel; the CONNECT reaching it is the proof.
+        let _ = client.get(&format!("{}/x", origin.base)).send();
+        let request = received(&proxy);
+        let authority = origin.base.trim_start_matches("http://");
+        assert!(
+            request.starts_with(&format!("CONNECT {authority} HTTP/1.1")),
+            "{request}"
+        );
+    }
+
+    #[test]
+    fn socks_only_env_proxy_yields_none() {
+        assert!(env_proxy_from(env(&[("ALL_PROXY", "socks5://127.0.0.1:1080")])).is_none());
+        assert!(env_proxy_from(env(&[("HTTPS_PROXY", "bad host:x")])).is_none());
+        assert!(env_proxy_from(env(&[])).is_none());
+    }
+
+    #[test]
+    fn env_proxy_keeps_credentials_and_no_proxy() {
+        let chosen = env_proxy_from(env(&[
+            ("HTTPS_PROXY", "http://user:pa%40ss@proxy.corp:3128"),
+            ("NO_PROXY", "localhost, .internal"),
+        ]))
+        .expect("env proxy");
+        assert_eq!(chosen.host(), "proxy.corp");
+        assert_eq!(chosen.port(), 3128);
+        assert_eq!(chosen.username(), Some("user"));
+        assert_eq!(chosen.password(), Some("pa%40ss"));
+        let uri = |s: &str| s.parse::<Uri>().expect("uri");
+        assert!(chosen.is_no_proxy(&uri("http://localhost/")));
+        assert!(chosen.is_no_proxy(&uri("https://api.internal/")));
+        assert!(!chosen.is_no_proxy(&uri("https://api.anthropic.com/")));
     }
 
     #[test]
