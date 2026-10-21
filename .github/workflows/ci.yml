@@ -55,6 +55,12 @@ jobs:
 
       - run: npm run tauri build -- --no-bundle
 
+      # The bundler has no icon fallback, so a bad bundle.icon list only
+      # breaks packaging; the deb needs no patchelf and catches it early.
+      - name: Bundle the deb
+        if: runner.os == 'Linux'
+        run: npm run tauri build -- --bundles deb
+
       - name: Check the exe version resource
         if: runner.os == 'Windows'
         shell: pwsh

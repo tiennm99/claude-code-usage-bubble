@@ -87,6 +87,8 @@ stay on disk until the phase that replaces each one deletes it.
     Then `npm ci`, `cargo fmt --check`,
     `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked`,
     `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle`.
+  - The Linux row also runs `npm run tauri build -- --bundles deb` (no
+    patchelf needed), so a broken `bundle.icon` list fails before release.
   - The Windows row uploads `target/release/claude-code-usage-bubble.exe` with
     `actions/upload-artifact` (name `bubble-exe-<sha>`, `retention-days: 7`).
   - Row `macos-latest`: toolchain, cache, `cargo check --all-targets --locked`
@@ -136,13 +138,17 @@ stay on disk until the phase that replaces each one deletes it.
   adds `PerMonitorV2`.
 - Only desktop icons are kept: the mobile (`android/`, `ios/`) and Windows
   Store (`Square*Logo.png`, `StoreLogo.png`) outputs of `tauri icon` are unused.
+- `bundle.icon` lists every desktop icon. The bundler has no fallback (an
+  empty list panics the AppImage step and ships a deb without hicolor icons).
+  `icons/icon.png` comes first because tauri-codegen takes the first `.png` as
+  the Linux and macOS default window icon.
 - The test window (`bubble-test`) exits the app on close, since D18 keeps the
   process alive after its last window is destroyed.
 
 ## Validation
 
 - Host: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `npm run lint` and `npm test` (zero tests, exit 0) all pass.
-- Host: `npm run tauri build -- --no-bundle` builds the binary with no signing key in the environment. No bundle is built on this host (no patchelf); bundling is first exercised by the Phase 10 dry run.
+- Host: `npm run tauri build -- --no-bundle` builds the binary with no signing key in the environment. `npm run tauri build -- --bundles deb` builds a deb with 32, 128, 256 and 512 px hicolor icons. The AppImage needs patchelf, so it is first exercised by the Phase 10 dry run.
 - CI: all three rows green; the Windows run has a downloadable `bubble-exe-<sha>` artifact that starts and shows the test window.
 
 ## Risks
