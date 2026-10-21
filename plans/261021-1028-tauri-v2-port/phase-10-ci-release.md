@@ -150,6 +150,7 @@ host has no patchelf and no display.
 - **`make-latest-json.js` scope.** Besides the listed guards it requires the exact asset set (any unexpected file fails), so a stray upload cannot slip into a release. It writes `<dir>/latest.json` and ignores an existing one, so a re-run is safe.
 - **yamllint.** The repo had no yamllint config, and the default rules reject every GitHub workflow (`on:` as a truthy key, no `---`, 80-column lines), `ci.yml` included. `.yamllint.yaml` relaxes exactly those three rules (line length 140), so the check is reproducible.
 - **Draft dry-run tag.** The tag check also runs for dispatch, so `v0.0.0-test` must point at a commit whose `Cargo.toml` says `0.0.0-test`; `docs/release-process.md` says so.
+- **Suffixed tags never publish.** The push trigger matches only plain `vX.Y.Z`, and `prepare` also fails a non-dispatch run on a suffixed tag. Before this, pushing `v0.0.0-test` (or an rc tag) started a run that published it with `--latest`, and both client comparators ignore the suffix.
 
 ## Residual risk
 
@@ -179,7 +180,7 @@ script, not against a real draft.
 | A missing secret silently produces an unsigned build | L x H | The signing step fails hard when the env var is empty. |
 | An old client picks the wrong asset | L x H | Exactly one `*.exe` asset, enforced by `make-latest-json.js`. |
 | The Tauri release is not the one `/releases/latest` returns | L x H | Tag runs publish non-draft, non-prerelease, `--latest`; check with `gh api repos/tiennm99/claude-code-usage-bubble/releases/latest -q .tag_name` after publishing. |
-| A draft dry run reaches users | L x H | `/releases/latest` skips drafts; both drafts are deleted after inspection. |
+| A draft dry run reaches users | L x H | `/releases/latest` skips drafts; the dry-run tag carries a suffix, which the push trigger and `prepare` refuse to publish; both drafts are deleted after inspection. |
 
 ## Rollback
 

@@ -1,7 +1,9 @@
 # Cutting a release
 
-The `release.yml` workflow builds and publishes on every pushed tag
-matching `v*.*.*`. The workflow asserts that the pushed tag matches
+The `release.yml` workflow builds and publishes on every pushed plain
+`vX.Y.Z` tag. Pushing a tag with a suffix (`vX.Y.Z-rc1`) publishes
+nothing: the updaters ignore suffixes, so an rc would reach every user
+as a stable release. The workflow asserts that the pushed tag matches
 `Cargo.toml` `version` and **fails fast on mismatch**, so the order
 below matters: bump Cargo *before* you tag.
 
@@ -31,7 +33,9 @@ below matters: bump Cargo *before* you tag.
 ## Testing without a real tag
 
 Use the workflow's `workflow_dispatch` input with a throwaway tag
-like `v0.0.0-test`. The release is created as a **draft**, so it
+that carries a suffix, like `v0.0.0-test`. The suffix keeps the tag
+push from starting a publishing run; never use a plain `vX.Y.Z` tag for
+a dry run, because pushing it publishes a release marked latest. The release is created as a **draft**, so it
 does not show up on the public Releases feed or trigger self-updates
 for users.
 The tag must already exist and point at a commit whose `Cargo.toml`

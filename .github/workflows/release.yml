@@ -1,13 +1,16 @@
 name: Release
 
-# A pushed tag publishes the release that every client updates from: legacy
-# Win32 clients (v0.5.0 and earlier) through the GitHub API's
+# A pushed plain vX.Y.Z tag publishes the release that every client updates
+# from: legacy Win32 clients (v0.5.0 and earlier) through the GitHub API's
 # `/releases/latest`, Tauri clients through its `latest.json` asset. A
 # dispatch run builds the same assets into a draft, which neither reaches.
+# Suffixed tags (vX.Y.Z-suffix) are dispatch-only: both client comparators
+# ignore the suffix, so publishing one would ship an rc as a stable update
+# and hide the final vX.Y.Z behind it.
 
 on:
   push:
-    tags: ['v*.*.*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
   workflow_dispatch:
     inputs:
       tag:
@@ -41,6 +44,10 @@ jobs:
           fi
           if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Tag '$tag' is not of the form vX.Y.Z or vX.Y.Z-suffix."
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] && [[ "$tag" == *-* ]]; then
+            echo "::error::Tag '$tag' has a suffix; suffixed tags are for draft dispatch runs only and are never published."
             exit 1
           fi
           expected="${tag#v}"
