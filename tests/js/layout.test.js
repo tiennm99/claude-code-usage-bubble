@@ -310,9 +310,10 @@ describe('wheelSteps', () => {
     assert.deepEqual(run([[-100, PIXEL, 0], [-100, PIXEL, 50], [-100, PIXEL, 100]]), [1, 1, 1]);
   });
 
-  it('gives one step for a single notch reported as few px', () => {
-    assert.deepEqual(run([[-40, PIXEL, 0]]), [1]);
-    assert.deepEqual(run([[-40, PIXEL, 0], [-40, PIXEL, 1000]]), [1, 1]);
+  it('waits for 100 px of travel before a step', () => {
+    assert.deepEqual(run([[-40, PIXEL, 0]]), [0]);
+    assert.deepEqual(run([[-40, PIXEL, 0], [-40, PIXEL, 10], [-40, PIXEL, 20]]), [0, 0, 1]);
+    assert.deepEqual(run([[-40, PIXEL, 0], [-40, PIXEL, 1000]]), [0, 0]);
   });
 
   it('turns a stream of small touchpad deltas into one step per 100 px', () => {
@@ -320,18 +321,28 @@ describe('wheelSteps', () => {
       Array.from({ length: 30 }, (_, i) => [-10, PIXEL, i * 10])
     );
     const steps = run(events);
-    // The first event starts the gesture with a step; the other 290 px add two.
     assert.equal(steps.reduce((a, b) => a + b, 0), 3);
     assert.ok(steps.every((s) => s === 0 || s === 1));
   });
 
   it('starts a new gesture after an idle pause', () => {
-    assert.deepEqual(run([[-60, PIXEL, 0], [-60, PIXEL, WHEEL_IDLE_MS + 1]]), [1, 1]);
-    assert.deepEqual(run([[-60, PIXEL, 0], [-60, PIXEL, WHEEL_IDLE_MS]]), [1, 0]);
+    assert.deepEqual(run([[-60, PIXEL, 0], [-60, PIXEL, WHEEL_IDLE_MS + 1]]), [0, 0]);
+    assert.deepEqual(run([[-60, PIXEL, 0], [-60, PIXEL, WHEEL_IDLE_MS]]), [0, 1]);
   });
 
   it('starts a new gesture when the direction flips', () => {
-    assert.deepEqual(run([[-150, PIXEL, 0], [10, PIXEL, 10]]), [1, -1]);
+    assert.deepEqual(run([[-150, PIXEL, 0], [10, PIXEL, 10]]), [1, 0]);
+    assert.deepEqual(run([[-150, PIXEL, 0], [60, PIXEL, 10], [60, PIXEL, 20]]), [1, 0, -1]);
+  });
+
+  it('ignores a few px of reversed jitter inside a gesture', () => {
+    assert.deepEqual(
+      run([[-10, PIXEL, 0], [-10, PIXEL, 10], [2, PIXEL, 20], [-10, PIXEL, 30], [1, PIXEL, 40], [-10, PIXEL, 50]]),
+      [0, 0, 0, 0, 0, 0],
+    );
+    // After a whole notch leaves no travel, a reverse twitch and the next
+    // forward delta still wait for 100 px.
+    assert.deepEqual(run([[-100, PIXEL, 0], [2, PIXEL, 10], [-10, PIXEL, 20]]), [1, 0, 0]);
   });
 
   it('sends several steps for one large delta', () => {
@@ -339,9 +350,9 @@ describe('wheelSteps', () => {
   });
 
   it('converts line and page deltas to px', () => {
-    // Three lines are 48 px: the gesture's first step, then one per 100 px.
+    // Three lines are 48 px, so the third event crosses 100 px.
     const lines = run([[-3, LINE, 0], [-3, LINE, 10], [-3, LINE, 20], [-3, LINE, 30]]);
-    assert.deepEqual(lines, [1, 0, 0, 1]);
+    assert.deepEqual(lines, [0, 0, 1, 0]);
     assert.deepEqual(run([[-1, PAGE, 0]]), [8]);
   });
 

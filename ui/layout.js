@@ -374,9 +374,10 @@ export const WHEEL_IDLE = Object.freeze({ acc: 0, lastMs: -Infinity });
 /**
  * Turn one Ctrl+wheel event into resize steps. Travel accumulates in px, so
  * a touchpad's stream of small deltas resizes gradually instead of one step
- * per event. The first event of a gesture always gives at least one step, so
- * a single mouse notch resizes however few px the platform reports for it.
- * A pause of `WHEEL_IDLE_MS` or a change of direction starts a new gesture.
+ * per event: a step is sent each time the gesture's travel reaches
+ * `WHEEL_STEP_PX`. A pause of `WHEEL_IDLE_MS` or a change of direction starts
+ * a new gesture from zero, so a few px of reversed jitter inside a touchpad
+ * stream never resizes the other way.
  * @param {WheelState} state State from the previous event, or `WHEEL_IDLE`.
  * @param {number} deltaY `WheelEvent.deltaY`; negative scrolls up and grows.
  * @param {number} deltaMode `WheelEvent.deltaMode`.
@@ -389,7 +390,8 @@ export function wheelSteps(state, deltaY, deltaMode, nowMs) {
     return { state, steps: 0 };
   }
   const fresh = nowMs - state.lastMs > WHEEL_IDLE_MS || Math.sign(state.acc) === -Math.sign(px);
-  const acc = fresh ? Math.sign(px) * Math.max(Math.abs(px), WHEEL_STEP_PX) : state.acc + px;
-  const steps = Math.trunc(acc / WHEEL_STEP_PX);
+  const acc = fresh ? px : state.acc + px;
+  // `|| 0` turns the -0 of a small reverse delta into a plain 0.
+  const steps = Math.trunc(acc / WHEEL_STEP_PX) || 0;
   return { state: { acc: acc - steps * WHEEL_STEP_PX, lastMs: nowMs }, steps };
 }
