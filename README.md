@@ -107,7 +107,10 @@ pick one:
 - `usage-monitor_X.Y.Z_amd64.AppImage`: make it executable
   (`chmod +x`) and run it. Like the Windows exe it is portable and keeps
   `settings.json` next to the AppImage file, so give it a folder you can
-  write to. The AppImage self-updates in place.
+  write to. The AppImage self-updates in place. If you turned on "Start
+  at login" in v0.6.0 or earlier and the AppImage path contains a space,
+  turn it off and on again once: those releases wrote the path unquoted,
+  so the app never started at login.
 - `usage-monitor_X.Y.Z_amd64.deb`: install it with
   `sudo apt install ./usage-monitor_X.Y.Z_amd64.deb`. The app
   still checks for updates, but installing one is left to you: download the
@@ -207,7 +210,7 @@ This writes a log file, truncated on each start, to:
 | OS | Log file |
 |----|----------|
 | Windows | `%TEMP%\usage-monitor.log` |
-| Linux | `$TMPDIR/usage-monitor.log`, usually `/tmp/usage-monitor.log` |
+| Linux | `$XDG_STATE_HOME/usage-monitor/usage-monitor.log`, usually `~/.local/state/usage-monitor/usage-monitor.log` (readable by your user only) |
 
 Settings are saved to:
 

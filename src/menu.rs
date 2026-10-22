@@ -13,7 +13,7 @@ use tauri::menu::{
     CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
 };
 use tauri::{AppHandle, Manager, State, Wry};
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 use tauri_plugin_autostart::{AutoLaunchManager, ManagerExt};
 
 use crate::core::i18n::LocaleStrings;
@@ -114,8 +114,27 @@ fn set_autostart(_app: &AppHandle, enable: bool) -> Result<(), String> {
     result.map_err(|err| err.to_string())
 }
 
+/// Linux bypasses the autostart plugin too: it writes the AppImage path
+/// into `Exec` unquoted, so a path with spaces never starts (see
+/// `platform::linux::set_autostart`).
+#[cfg(target_os = "linux")]
+fn autostart_state(_app: &AppHandle) -> Result<bool, String> {
+    crate::platform::linux::autostart_enabled(crate::runtime::AUTOSTART_NAME)
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn set_autostart(app: &AppHandle, enable: bool) -> Result<(), String> {
+    crate::platform::linux::set_autostart(
+        crate::runtime::AUTOSTART_NAME,
+        app.env().appimage,
+        enable,
+    )
+    .map_err(|err| err.to_string())
+}
+
 /// Without the plugin (it failed to set up) start at login reads as off.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn autostart_state(app: &AppHandle) -> Result<bool, String> {
     if app.try_state::<AutoLaunchManager>().is_none() {
         return Ok(false);
@@ -123,7 +142,7 @@ fn autostart_state(app: &AppHandle) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|err| err.to_string())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn set_autostart(app: &AppHandle, enable: bool) -> Result<(), String> {
     if app.try_state::<AutoLaunchManager>().is_none() {
         return Err("autostart plugin is not available".into());

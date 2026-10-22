@@ -1,6 +1,7 @@
 //! Portable logic with no OS or Tauri dependency, unit-tested on every host.
 
 pub mod color;
+pub mod desktop_entry;
 pub mod geom;
 pub mod i18n;
 pub mod menu_model;
