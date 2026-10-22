@@ -70,7 +70,7 @@ A release carries exactly these files and nothing else:
 | `usage-monitor.exe` | Windows job, `npm run tauri build -- --no-bundle` | Legacy Win32 clients (GitHub API) and Tauri Windows clients (`latest.json`) |
 | `usage-monitor.exe.sig` | `tauri signer sign` on the exe | Tauri Windows clients |
 | `usage-monitor_X.Y.Z_amd64.AppImage` | Linux job, `tauri bundle` | Tauri AppImage clients |
-| `usage-monitor_X.Y.Z_amd64.AppImage.sig` | the bundler, with the signing key | Tauri AppImage clients |
+| `usage-monitor_X.Y.Z_amd64.AppImage.sig` | `tauri signer sign` on the renamed AppImage | Tauri AppImage clients |
 | `usage-monitor_X.Y.Z_amd64.deb` | Linux job, `tauri bundle` | Users installing by hand (`.deb` installs check for updates but do not apply them) |
 | `latest.json` | `scripts/make-latest-json.js` in the publish job | Tauri clients, through the updater endpoint in `tauri.conf.json` |
 
@@ -85,11 +85,13 @@ The bundler names the Linux outputs after `productName`
 ("Usage Monitor"), and GitHub rewrites spaces in asset
 names, which would break the `latest.json` URLs. The Linux job
 therefore copies the bundles to space-free kebab names before upload:
-`usage-monitor_<version>_amd64.AppImage`, its `.sig`, and
-`usage-monitor_<version>_amd64.deb`. The signature covers
-the file content, not its name, so renaming keeps it valid. The
-bundler also signs the deb, but that signature is not published,
-because no updater entry uses it.
+`usage-monitor_<version>_amd64.AppImage` and
+`usage-monitor_<version>_amd64.deb`. The bundler runs without the
+signing key, because the AppImage bundler downloads and runs
+unpinned linuxdeploy tools. A separate step that alone sees the key
+then signs the renamed AppImage with `tauri signer sign`, which
+writes `usage-monitor_<version>_amd64.AppImage.sig`. The deb is not
+signed, because no updater entry uses it.
 
 ### Legacy-client asset contract
 

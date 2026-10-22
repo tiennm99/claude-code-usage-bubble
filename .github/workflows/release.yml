@@ -170,22 +170,18 @@ jobs:
 
       - run: npm ci
 
-      # Compile without the key, then bundle and sign with it: `tauri bundle`
-      # packages the binary already built and runs no cargo build scripts.
+      # Compile and bundle without the key: the AppImage bundler downloads
+      # and runs linuxdeploy tools at whatever version is current, so the key
+      # must never be in its environment. The AppImage is signed on its own
+      # after the rename.
       - run: npm run tauri build -- --no-bundle -- --locked
 
-      - name: Bundle the AppImage and deb with updater signatures
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: >-
-          npm run tauri bundle --
-          --bundles appimage,deb
-          --config '{"bundle":{"createUpdaterArtifacts":true}}'
+      - name: Bundle the AppImage and deb
+        run: npm run tauri bundle -- --bundles appimage,deb
 
       # The bundler names outputs after productName, which has spaces, and
       # GitHub rewrites spaces in asset names, so the URLs in latest.json
-      # would no longer match. A signature covers the content, not the name.
+      # would no longer match.
       - name: Rename the bundles to space-free names
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -204,9 +200,19 @@ jobs:
           name="usage-monitor_${VERSION}_amd64"
           mkdir -p dist
           cp "$appimage" "dist/$name.AppImage"
-          cp "$appimage.sig" "dist/$name.AppImage.sig"
           cp "$deb" "dist/$name.deb"
-          test -s "dist/$name.AppImage.sig"
+
+      # As on Windows, `signer sign` writes a separate .sig next to the file
+      # and leaves the AppImage bytes as bundled.
+      - name: Sign the AppImage
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          appimage="dist/usage-monitor_${VERSION}_amd64.AppImage"
+          npx tauri signer sign --app-version "$VERSION" "$appimage"
+          test -s "$appimage.sig"
           ls -l dist
 
       - uses: actions/upload-artifact@v7
