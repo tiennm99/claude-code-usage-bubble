@@ -258,9 +258,7 @@ What the app runs:
   runs `claude -p .` for Claude Code and `codex exec .` for Codex, for each
   provider that was rejected. They run hidden in the background, so the CLI
   refreshes its token. Each run sends one tiny prompt, which counts toward
-  your usage. The runs use the system temporary directory as their working
-  directory, and Codex runs with `--skip-git-repo-check` and a read-only
-  sandbox.
+  your usage.
 
 What the app stores locally:
 
