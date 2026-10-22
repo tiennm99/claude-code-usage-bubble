@@ -1,4 +1,4 @@
-// Pure bubble geometry and colour helpers. Every length is in physical
+// Pure bubble geometry, colour and input helpers. Every length is in physical
 // pixels, driven by the canvas size and DPI that Rust sends in the payload,
 // never by `innerWidth * devicePixelRatio`. Integer steps truncate toward
 // zero, like the Rust `i32` arithmetic they mirror.
@@ -17,6 +17,15 @@ const PCT_TEMPLATE = '100%';
 
 /** Font weight of the tail percent; keep in step with `.tail-pct` in bubble.css. */
 export const TAIL_PCT_WEIGHT = 600;
+
+/** Wheel travel, in px, that makes one Ctrl+wheel resize step. */
+export const WHEEL_STEP_PX = 100;
+
+/** A pause this long, in ms, ends a Ctrl+wheel gesture. */
+export const WHEEL_IDLE_MS = 200;
+
+/** `WheelEvent.deltaMode` values to px: pixel, line, page. */
+const WHEEL_MODE_PX = [1, 16, 800];
 
 /** Usage at or above this percent pulses. */
 export const PULSE_THRESHOLD_PCT = 95;
@@ -76,6 +85,19 @@ const PULSE_STRENGTH = 0.3;
  * @param {number} fontPx Font size in physical px.
  * @param {number} [weight] CSS font weight; regular (400) when omitted.
  * @returns {number} Width in physical px.
+ */
+
+/**
+ * Ctrl+wheel gesture state between wheel events.
+ * @typedef {object} WheelState
+ * @property {number} acc Travel not yet turned into steps, in px; positive grows.
+ * @property {number} lastMs Time of the previous event, in ms; -Infinity before any.
+ */
+
+/**
+ * @typedef {object} WheelResult
+ * @property {WheelState} state State to pass with the next event.
+ * @property {number} steps Resize steps to send: positive grows, negative shrinks.
  */
 
 /**
@@ -346,3 +368,28 @@ export function headLabelText(label, labelW, rectW) {
   return label === '' || labelW > rectW ? HEAD_LABEL_FALLBACK : label;
 }
 
+/** Wheel state before any Ctrl+wheel event. */
+export const WHEEL_IDLE = Object.freeze({ acc: 0, lastMs: -Infinity });
+
+/**
+ * Turn one Ctrl+wheel event into resize steps. Travel accumulates in px, so
+ * a touchpad's stream of small deltas resizes gradually instead of one step
+ * per event. The first event of a gesture always gives at least one step, so
+ * a single mouse notch resizes however few px the platform reports for it.
+ * A pause of `WHEEL_IDLE_MS` or a change of direction starts a new gesture.
+ * @param {WheelState} state State from the previous event, or `WHEEL_IDLE`.
+ * @param {number} deltaY `WheelEvent.deltaY`; negative scrolls up and grows.
+ * @param {number} deltaMode `WheelEvent.deltaMode`.
+ * @param {number} nowMs Event time in ms.
+ * @returns {WheelResult} The next state and the steps to send.
+ */
+export function wheelSteps(state, deltaY, deltaMode, nowMs) {
+  const px = -deltaY * (WHEEL_MODE_PX[deltaMode] ?? 1);
+  if (!Number.isFinite(px) || px === 0) {
+    return { state, steps: 0 };
+  }
+  const fresh = nowMs - state.lastMs > WHEEL_IDLE_MS || Math.sign(state.acc) === -Math.sign(px);
+  const acc = fresh ? Math.sign(px) * Math.max(Math.abs(px), WHEEL_STEP_PX) : state.acc + px;
+  const steps = Math.trunc(acc / WHEEL_STEP_PX);
+  return { state: { acc: acc - steps * WHEEL_STEP_PX, lastMs: nowMs }, steps };
+}

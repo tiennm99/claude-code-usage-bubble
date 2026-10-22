@@ -15,6 +15,8 @@ import {
   tailLayout,
   timeFillWidth,
   usageFillWidth,
+  WHEEL_IDLE,
+  wheelSteps,
 } from './layout.js';
 import {
   forwardErrors,
@@ -447,6 +449,9 @@ window.addEventListener('contextmenu', (event) => {
   invoke('show_context_menu', { label: windowLabel }).catch(logFailure('show_context_menu'));
 });
 
+/** Ctrl+wheel gesture carried between wheel events. */
+let wheelState = WHEEL_IDLE;
+
 window.addEventListener(
   'wheel',
   (event) => {
@@ -455,11 +460,15 @@ window.addEventListener(
     }
     // Ctrl+wheel would otherwise zoom the page.
     event.preventDefault();
-    const dir = Math.sign(-event.deltaY);
-    if (event.target !== pill || dir === 0) {
+    if (event.target !== pill) {
       return;
     }
-    invoke('bubble_resize_step', { dir }).catch(logFailure('bubble_resize_step'));
+    const result = wheelSteps(wheelState, event.deltaY, event.deltaMode, event.timeStamp);
+    wheelState = result.state;
+    const dir = Math.sign(result.steps);
+    for (let i = Math.abs(result.steps); i > 0; i -= 1) {
+      invoke('bubble_resize_step', { dir }).catch(logFailure('bubble_resize_step'));
+    }
   },
   { passive: false },
 );

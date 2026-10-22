@@ -19,6 +19,9 @@ import {
   tailLayout,
   timeFillWidth,
   usageFillWidth,
+  WHEEL_IDLE,
+  WHEEL_IDLE_MS,
+  wheelSteps,
 } from '../../ui/layout.js';
 
 /**
@@ -279,5 +282,70 @@ describe('headLabelText', () => {
   it('falls back to 5H when empty or too wide', () => {
     assert.equal(headLabelText('', 0, 58), '5H');
     assert.equal(headLabelText('23h 59m', 59, 58), '5H');
+  });
+});
+
+describe('wheelSteps', () => {
+  const PIXEL = 0;
+  const LINE = 1;
+  const PAGE = 2;
+
+  /**
+   * Feed wheel events through `wheelSteps` and collect the steps.
+   * @param {Array<[number, number, number]>} events `[deltaY, deltaMode, ms]` triples.
+   * @returns {number[]} Steps per event.
+   */
+  const run = (events) => {
+    let state = WHEEL_IDLE;
+    return events.map(([deltaY, mode, ms]) => {
+      const result = wheelSteps(state, deltaY, mode, ms);
+      state = result.state;
+      return result.steps;
+    });
+  };
+
+  it('gives exactly one step per mouse notch', () => {
+    assert.deepEqual(run([[-100, PIXEL, 0]]), [1]);
+    assert.deepEqual(run([[100, PIXEL, 0]]), [-1]);
+    assert.deepEqual(run([[-100, PIXEL, 0], [-100, PIXEL, 50], [-100, PIXEL, 100]]), [1, 1, 1]);
+  });
+
+  it('gives one step for a single notch reported as few px', () => {
+    assert.deepEqual(run([[-40, PIXEL, 0]]), [1]);
+    assert.deepEqual(run([[-40, PIXEL, 0], [-40, PIXEL, 1000]]), [1, 1]);
+  });
+
+  it('turns a stream of small touchpad deltas into one step per 100 px', () => {
+    const events = /** @type {Array<[number, number, number]>} */ (
+      Array.from({ length: 30 }, (_, i) => [-10, PIXEL, i * 10])
+    );
+    const steps = run(events);
+    // The first event starts the gesture with a step; the other 290 px add two.
+    assert.equal(steps.reduce((a, b) => a + b, 0), 3);
+    assert.ok(steps.every((s) => s === 0 || s === 1));
+  });
+
+  it('starts a new gesture after an idle pause', () => {
+    assert.deepEqual(run([[-60, PIXEL, 0], [-60, PIXEL, WHEEL_IDLE_MS + 1]]), [1, 1]);
+    assert.deepEqual(run([[-60, PIXEL, 0], [-60, PIXEL, WHEEL_IDLE_MS]]), [1, 0]);
+  });
+
+  it('starts a new gesture when the direction flips', () => {
+    assert.deepEqual(run([[-150, PIXEL, 0], [10, PIXEL, 10]]), [1, -1]);
+  });
+
+  it('sends several steps for one large delta', () => {
+    assert.deepEqual(run([[-250, PIXEL, 0], [-50, PIXEL, 10]]), [2, 1]);
+  });
+
+  it('converts line and page deltas to px', () => {
+    // Three lines are 48 px: the gesture's first step, then one per 100 px.
+    const lines = run([[-3, LINE, 0], [-3, LINE, 10], [-3, LINE, 20], [-3, LINE, 30]]);
+    assert.deepEqual(lines, [1, 0, 0, 1]);
+    assert.deepEqual(run([[-1, PAGE, 0]]), [8]);
+  });
+
+  it('ignores zero and non-finite deltas', () => {
+    assert.deepEqual(run([[0, PIXEL, 0], [Number.NaN, PIXEL, 10]]), [0, 0]);
   });
 });
