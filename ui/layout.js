@@ -15,6 +15,9 @@ const COUNTDOWN_TEMPLATE = '999d';
 /** Widest percent text the tail reserves room for. */
 const PCT_TEMPLATE = '100%';
 
+/** Font weight of the tail percent; keep in step with `.tail-pct` in bubble.css. */
+export const TAIL_PCT_WEIGHT = 600;
+
 /** Usage at or above this percent pulses. */
 export const PULSE_THRESHOLD_PCT = 95;
 
@@ -67,10 +70,11 @@ const PULSE_STRENGTH = 0.3;
  */
 
 /**
- * Measures `text` set at `fontPx` (regular weight) in physical px.
+ * Measures `text` set at `fontPx` and `weight` in physical px.
  * @callback MeasureText
  * @param {string} text Text to measure.
  * @param {number} fontPx Font size in physical px.
+ * @param {number} [weight] CSS font weight; regular (400) when omitted.
  * @returns {number} Width in physical px.
  */
 
@@ -174,7 +178,7 @@ export function headMetrics(canvas) {
  * their right-aligned texts. When the tail is too narrow, the text column
  * shrinks (possibly to zero) before the bars drop below their minimum.
  * @param {Canvas} canvas Window canvas.
- * @param {MeasureText} measure Regular-weight text measurement.
+ * @param {MeasureText} measure Text measurement.
  * @returns {TailLayout} Tail geometry in physical px.
  */
 export function tailLayout(canvas, measure) {
@@ -186,7 +190,7 @@ export function tailLayout(canvas, measure) {
   const barTextGap = scale(8, dpi);
 
   const countdownW = Math.ceil(measure(COUNTDOWN_TEMPLATE, fonts.main));
-  const pctReserveW = Math.ceil(measure(PCT_TEMPLATE, fonts.small)) + scale(2, dpi);
+  const pctReserveW = Math.ceil(measure(PCT_TEMPLATE, fonts.small, TAIL_PCT_WEIGHT)) + scale(2, dpi);
 
   const usageBarH = clamp(idiv(h * 10, 100), scale(6, dpi), scale(12, dpi));
   const timeBarH = clamp(idiv(h * 4, 100), scale(3, dpi), scale(6, dpi));
@@ -341,3 +345,4 @@ export function timeFillWidth(barW, fraction) {
 export function headLabelText(label, labelW, rectW) {
   return label === '' || labelW > rectW ? HEAD_LABEL_FALLBACK : label;
 }
+

@@ -53,7 +53,7 @@ const DRAG_THRESHOLD_PX = 3;
 const PULSE_INTERVAL_MS = 80;
 const TIME_PROGRESS_INTERVAL_MS = 60_000;
 const FONT_STACK = '"Segoe UI", system-ui, sans-serif';
-/** Weight the layout's reserved text widths are measured at. */
+/** Weight text is measured at when the caller names none (regular). */
 const MEASURE_WEIGHT = 400;
 const HEAD_LABEL_WEIGHT = 600;
 
@@ -212,7 +212,7 @@ function relayout(p) {
   }
   const canvas = { canvasW: p.canvasW, canvasH: p.canvasH, dpi: p.dpi };
   head = headMetrics(canvas);
-  tail = tailLayout(canvas, (text, px) => measure(text, px));
+  tail = tailLayout(canvas, (text, px, weight) => measure(text, px, weight));
   layoutKey = key;
 
   rings.setAttribute('viewBox', `0 0 ${p.canvasW} ${p.canvasH}`);

@@ -15,6 +15,7 @@ import {
   remainingFraction,
   ringDash,
   scale,
+  TAIL_PCT_WEIGHT,
   tailLayout,
   timeFillWidth,
   usageFillWidth,
@@ -128,6 +129,21 @@ describe('tailLayout', () => {
     const tail = tailLayout({ canvasW: 80, canvasH: 66, dpi: 96 }, () => 50);
     assert.equal(tail.usagePctRect.l, tail.usagePctRect.r);
     assert.equal(tail.usageBarRect.r - tail.usageBarRect.l, 8);
+  });
+
+  it('reserves the percent column at the weight it is drawn in', () => {
+    const regular = 40;
+    const semibold = 61.3;
+    /** @type {Array<number | undefined>} */
+    const pctWeights = [];
+    const tail = tailLayout({ canvasW: 360, canvasH: 138, dpi: 96 }, (text, _px, weight) => {
+      if (text === '100%') {
+        pctWeights.push(weight);
+      }
+      return weight === TAIL_PCT_WEIGHT ? semibold : regular;
+    });
+    assert.deepEqual(pctWeights, [600]);
+    assert.ok(tail.usagePctRect.r - tail.usagePctRect.l >= Math.ceil(semibold));
   });
 
   it('rounds fractional measurements up', () => {
