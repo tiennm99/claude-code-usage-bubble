@@ -33,7 +33,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDA1RUQyREMxNDdFNTRCMUYKUldRZlMrVkh3UzN0QllncWx6V2I3NC9qOUNQU0tUS211VW1VRTBmLzlLcnl0cnk4UmdXMWY5cWkK",
       "endpoints": [
         "https://github.com/tiennm99/usage-monitor/releases/latest/download/latest.json"
       ]

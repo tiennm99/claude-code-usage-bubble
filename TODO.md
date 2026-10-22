@@ -3,12 +3,11 @@
 Steps left before the Tauri v2 port on `feat/tauri-port` can ship. Do them in
 order.
 
-1. **Create the updater signing key.** Run `npx tauri signer generate`, put the
-   public key in `plugins.updater.pubkey` in `tauri.conf.json`, add the
-   `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-   repository secrets, and keep an offline backup of the key pair. Until then
-   the release workflow refuses to build and the app rejects every downloaded
-   update.
+1. **Finish the updater signing key.** The key pair exists, its public key is
+   in `tauri.conf.json`, and the `TAURI_SIGNING_PRIVATE_KEY` secret is set.
+   Still to do: add the `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secret, and keep
+   an offline backup of `usage-monitor.key` and its password. Losing either
+   leaves installed copies unable to update.
 2. **Test on Windows 10 and 11.** Download the exe artifact from the latest CI
    run on `feat/tauri-port` and work through the checklist in
    [the final port review](plans/reports/code-reviewer-261021-1028-tauri-port-final.md).
