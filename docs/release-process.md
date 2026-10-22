@@ -119,8 +119,9 @@ updater code at v0.4.0, v0.4.1 and v0.5.0, they need:
   `updates/updater-helper-*.exe` files they leave behind.
 
 Since the rename, an upgraded install starts with default settings and
-keeps any autostart entry the legacy app registered: the settings folder
-and autostart entry names changed, and nothing migrates them. See
+keeps any autostart entry the legacy app registered: settings now live in
+`settings.json` next to the exe, the autostart entry name changed, and
+nothing migrates either. See
 [the rename plan](../plans/261021-1226-rename-to-usage-monitor/plan.md).
 
 `scripts/make-latest-json.js` enforces the asset rules before

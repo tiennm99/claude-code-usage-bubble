@@ -41,8 +41,9 @@ merges into `main`.
 
 ## Accepted costs
 
-- Installs that upgrade start with default settings, because the settings
-  folder name changed and nothing migrates it.
+- Installs that upgrade start with default settings: the portable Windows
+  exe and the AppImage now keep `settings.json` next to the file, and nothing
+  migrates the old one.
 - On Windows, an install that had autostart on keeps its old Run entry, which
   points at the same exe file. Turning autostart on in the new app adds a
   second entry.

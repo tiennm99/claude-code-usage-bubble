@@ -1,6 +1,7 @@
-// Persisted settings. The path, schema, key names and physical-px positions
-// stay byte-compatible with the Win32 builds, so no migration step exists.
+// Persisted settings. The schema, key names and physical-px positions stay
+// byte-compatible with the Win32 builds.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::geom::{
     position_on_any_monitor, Rect, DEFAULT_BUBBLE_SIZE, MAX_BUBBLE_SIZE, MIN_BUBBLE_SIZE,
 };
+use crate::update::channel::Channel;
 use crate::usage::ProviderId;
 
 pub const APP_DIR_NAME: &str = "UsageMonitor";
@@ -187,8 +189,33 @@ impl Settings {
     }
 }
 
+/// The folder holding `settings.json`. The Windows exe and the AppImage are
+/// portable, so their settings sit next to the file and move with it. A
+/// `.deb` install lives in a read-only system folder and keeps them in the
+/// user's config folder.
 pub fn settings_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join(APP_DIR_NAME))
+    portable_dir(
+        crate::update::channel::current(),
+        std::env::var_os("APPIMAGE"),
+        std::env::current_exe().ok(),
+    )
+    .or_else(|| dirs::config_dir().map(|d| d.join(APP_DIR_NAME)))
+}
+
+/// The folder of the portable file for `channel`: the exe on Windows, the
+/// AppImage file (not its temporary mount) on Linux. `None` for installs
+/// that are not portable.
+fn portable_dir(
+    channel: Channel,
+    appimage: Option<OsString>,
+    exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let file = match channel {
+        Channel::Portable => exe?,
+        Channel::AppImage => PathBuf::from(appimage?),
+        Channel::PackageManager | Channel::Unsupported => return None,
+    };
+    file.parent().map(Path::to_path_buf)
 }
 
 pub fn settings_path() -> PathBuf {
@@ -274,6 +301,37 @@ pub fn save_to(path: &Path, settings: &Settings) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_installs_keep_settings_next_to_the_file() {
+        let folder = Path::new("Tools").join("Usage");
+        assert_eq!(
+            portable_dir(
+                Channel::Portable,
+                None,
+                Some(folder.join("usage-monitor.exe"))
+            ),
+            Some(folder)
+        );
+        // The AppImage file's folder, not the mount the exe runs from.
+        assert_eq!(
+            portable_dir(
+                Channel::AppImage,
+                Some(OsString::from("/home/u/Apps/usage-monitor.AppImage")),
+                Some(PathBuf::from("/tmp/.mount_usage/usr/bin/usage-monitor")),
+            ),
+            Some(PathBuf::from("/home/u/Apps"))
+        );
+        assert_eq!(
+            portable_dir(
+                Channel::PackageManager,
+                None,
+                Some(PathBuf::from("/usr/bin/usage-monitor"))
+            ),
+            None
+        );
+        assert_eq!(portable_dir(Channel::Unsupported, None, None), None);
+    }
 
     #[test]
     fn old_two_provider_settings_json_still_loads() {

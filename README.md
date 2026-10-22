@@ -89,8 +89,10 @@ and start the app again.
 
 Grab `usage-monitor.exe` from the
 [Releases page](https://github.com/tiennm99/usage-monitor/releases/latest).
-Put it anywhere on disk (e.g. `%LOCALAPPDATA%\UsageMonitor\`) and
-run it. The app self-updates from the same Releases feed.
+Put it in a folder of its own that you can write to (e.g.
+`%LOCALAPPDATA%\UsageMonitor\`) and run it. The app is portable: it keeps
+`settings.json` next to the exe, so moving the folder keeps your settings. It
+self-updates from the same Releases feed.
 
 **First-run note:** the binary is unsigned, so SmartScreen will show
 "Windows protected your PC". Click **More info** → **Run anyway**. Code
@@ -103,7 +105,9 @@ From the same
 pick one:
 
 - `usage-monitor_X.Y.Z_amd64.AppImage`: make it executable
-  (`chmod +x`) and run it. The AppImage self-updates in place.
+  (`chmod +x`) and run it. Like the Windows exe it is portable and keeps
+  `settings.json` next to the AppImage file, so give it a folder you can
+  write to. The AppImage self-updates in place.
 - `usage-monitor_X.Y.Z_amd64.deb`: install it with
   `sudo apt install ./usage-monitor_X.Y.Z_amd64.deb`. The app
   still checks for updates, but installing one is left to you: download the
@@ -209,8 +213,9 @@ Settings are saved to:
 
 | OS | Settings file |
 |----|---------------|
-| Windows | `%APPDATA%\UsageMonitor\settings.json` |
-| Linux | `$XDG_CONFIG_HOME/UsageMonitor/settings.json`, usually `~/.config/UsageMonitor/settings.json` |
+| Windows | `settings.json` next to `usage-monitor.exe` |
+| Linux AppImage | `settings.json` next to the `.AppImage` file |
+| Linux `.deb` | `$XDG_CONFIG_HOME/UsageMonitor/settings.json`, usually `~/.config/UsageMonitor/settings.json` |
 
 Other files the app writes:
 
