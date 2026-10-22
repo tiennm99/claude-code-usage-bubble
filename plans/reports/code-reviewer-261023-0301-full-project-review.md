@@ -324,3 +324,14 @@ Separately, chatgpt.rs:99 uses Option<Option<Box<T>>> plus a FlattenBoxed trait 
 - `src/core/state.rs:155` A 95% crossing blocked by the cooldown is lost for good; the user never gets the 'limit is close' alert. The mechanics are as described. In src/core/state.rs:133-136 a crossing is recorded only when old_pct < threshold <= new_pct. At lines 155-161 a crossing that admit_alert (lines 168-176) refuses is dropped and nothing remembers it. last_alert_at is shared by every provider and by session-expired alerts. So the sequence 70->85 at t0, then 85->96 at t0+10min, then parked in 96..100 does produce only
 - `tauri.conf.json:35` requireSignedVersion is off, so a crafted latest.json can force a downgrade to an older signed build. The finding misreads the plugin. In tauri-plugin-updater 2.14.0, verify_signed_version (updater.rs ~1927-1965) always compares the signed version with the announced one when the signature's trusted comment has a `version:` field, and returns SignedVersionMismatch if they differ, whatever `require_signed_version` is set to. The flag matters only when the signature has no version at all: it decides 
 - `ui/bubble.js:360` Bubble/panel DOM glue (bubble.js, panel.js) has no tests; only the pure helpers are covered. It is true that bubble.js and panel.js have no direct tests. tests/js only covers layout.js, panel-view.js and make-latest-json.js. But the failure scenario the finding gives does not hold. It claims that renaming a payload field would pass the Rust tests and only show up at runtime. That is wrong. The test `wire_format_is_camel_case_with_nulls` in src/core/payload.rs (around lines 281-338) serial
+
+## Outcome
+
+All items not marked *needs decision* are implemented on the `review-fixes` branch, each with tests where the behaviour is testable. A follow-up review of the merged branch found three more problems, now fixed: a queued-poll race, Windows refresh treating a missing `claude.cmd` as started, and an imprecise update-check line in the README.
+
+Still open:
+
+- Items 1, 6, 13, 20 and 28 wait for the owner's decision.
+- On GNOME, the portal reports the light style as "no preference", which the app maps to its dark default. So a live switch from dark to light is not followed there. This keeps an earlier deliberate choice and is the owner's call.
+- A start-at-login entry written by v0.6.0 or earlier keeps its unquoted path until the user toggles the menu item. The README says so. Rewriting it at startup is the alternative.
+- Windows-only code and the release workflows were checked by reading and linting only. They need a Windows CI run and a real tagged release to confirm.
