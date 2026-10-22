@@ -181,7 +181,10 @@ file is on the default branch, so this workflow, and a dry run of it,
 is available only after the Tauri port merges into `main`:
 
 1. Pick a version `X.Y.Z` higher than every release in the field, so
-   every client sees it as an update.
+   every client sees it as an update. The workflow fails before it
+   builds anything unless `X.Y.Z` sorts strictly after the tag that
+   `/releases/latest` returns (`sort -V`); with no published release
+   yet, any version passes.
 2. Start "Release legacy" from the Actions tab with `ref` set to a ref
    holding the Win32 sources (for example `v0.5.0`), `version` set to
    `X.Y.Z`, `tag` set to `vX.Y.Z`, and `draft` left at `true`.

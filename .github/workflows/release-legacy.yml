@@ -32,8 +32,37 @@ permissions:
   contents: read
 
 jobs:
+  # A version at or below the live release is no update for any client, and
+  # publishing it as latest would hide that release from legacy clients.
+  check-version:
+    name: Check the version is above the live release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Compare with /releases/latest
+        run: |
+          err=$(mktemp)
+          if latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .tag_name 2>"$err"); then
+            live="${latest#v}"
+            highest=$(printf '%s\n%s\n' "$live" "$VERSION" | sort -V | tail -n 1)
+            if [ "$VERSION" = "$live" ] || [ "$highest" != "$VERSION" ]; then
+              echo "::error::version '$VERSION' is not higher than the live release $latest."
+              exit 1
+            fi
+            echo "$VERSION is higher than the live release $latest."
+          elif grep -q 'HTTP 404' "$err"; then
+            echo "No published release yet, so any version is higher."
+          else
+            cat "$err" >&2
+            echo "::error::Could not read /releases/latest."
+            exit 1
+          fi
+
   win-x64:
     name: Windows x64 (legacy)
+    needs: check-version
     runs-on: windows-latest
     outputs:
       sha: ${{ steps.sha.outputs.sha }}
