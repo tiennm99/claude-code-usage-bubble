@@ -166,8 +166,11 @@ pub struct Runtime {
     http: net::Client,
     registry: Mutex<Registry>,
     /// At most one poll runs at a time; a Refresh spam or a timer firing
-    /// during a slow poll is dropped instead of stacking requests.
+    /// during a slow poll is folded into one follow-up poll through
+    /// `poll_requested` instead of stacking requests.
     poll_in_flight: AtomicBool,
+    /// A poll was asked for while one was in flight.
+    poll_requested: AtomicBool,
     /// The release the last check found, applied by the version menu item.
     /// Never locked together with `state`.
     pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
@@ -276,27 +279,44 @@ impl Runtime {
         }
     }
 
-    /// Start a poll on a worker thread unless one is already running.
+    /// Start a poll on a worker thread. While one is running the request is
+    /// queued instead, and the worker polls once more when it is done, so a
+    /// provider enabled mid-poll still gets its data.
     pub fn spawn_poll(self: &Arc<Self>) {
         if self
             .poll_in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            log::debug!("poll already in flight; skipped");
+            self.poll_requested.store(true, Ordering::Release);
+            log::debug!("poll already in flight; queued another");
             return;
         }
         let runtime = Arc::clone(self);
         let spawned = std::thread::Builder::new()
             .name("poll".into())
-            .spawn(move || {
-                runtime.poll_once();
-                runtime.poll_in_flight.store(false, Ordering::Release);
-                runtime.propagate();
-            });
+            .spawn(move || runtime.run_polls());
         if let Err(err) = spawned {
             log::error!("poll thread could not start: {err}");
             self.poll_in_flight.store(false, Ordering::Release);
+        }
+    }
+
+    /// Body of the poll worker: poll until no request is queued, then hand
+    /// the in-flight flag back.
+    fn run_polls(self: &Arc<Self>) {
+        loop {
+            self.poll_once();
+            self.propagate();
+            if !self.poll_requested.swap(false, Ordering::AcqRel) {
+                break;
+            }
+        }
+        self.poll_in_flight.store(false, Ordering::Release);
+        // A request that came after the last check but before the flag was
+        // cleared was only queued; start it now.
+        if self.poll_requested.swap(false, Ordering::AcqRel) {
+            self.spawn_poll();
         }
     }
 
@@ -967,6 +987,7 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
         http,
         registry: Mutex::new(Registry::with_defaults()),
         poll_in_flight: AtomicBool::new(false),
+        poll_requested: AtomicBool::new(false),
         pending_update: Mutex::new(None),
         scheduler: tx,
         trays: Trays::default(),
