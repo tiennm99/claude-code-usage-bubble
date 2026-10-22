@@ -1,6 +1,8 @@
 //! Linux-only helpers.
 
 use std::ffi::OsString;
+use std::io;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use x11rb::connection::Connection;
@@ -8,6 +10,7 @@ use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt, KeyButMask, Window}
 use x11rb::rust_connection::RustConnection;
 
 use super::FullscreenCheck;
+use crate::core::desktop_entry;
 
 /// The AppIndicator libraries the tray backend loads, in its own order. The
 /// unversioned names come from the backend's `backcompat` feature (on by
@@ -260,6 +263,52 @@ fn read_color_scheme() -> Option<u32> {
             None
         }
     }
+}
+
+/// The start-at-login entry, `~/.config/autostart/<name>.desktop`: the file
+/// the autostart plugin wrote in earlier releases, so an entry made by one
+/// of them still reads as enabled and is removed by a disable.
+fn autostart_file(name: &str) -> io::Result<PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home directory"))?;
+    Ok(home
+        .join(".config")
+        .join("autostart")
+        .join(format!("{name}.desktop")))
+}
+
+/// Whether the start-at-login entry `name` exists.
+pub fn autostart_enabled(name: &str) -> io::Result<bool> {
+    Ok(autostart_file(name)?.exists())
+}
+
+/// Write or remove the start-at-login entry `name`. Enabling starts
+/// `appimage` when the process runs from an AppImage (its mounted
+/// executable moves on every run), otherwise the current executable. The
+/// path is quoted in `Exec`, so a path with spaces or shell characters
+/// starts the right file.
+pub fn set_autostart(name: &str, appimage: Option<OsString>, enable: bool) -> io::Result<()> {
+    let file = autostart_file(name)?;
+    if !enable {
+        return match std::fs::remove_file(&file) {
+            Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        };
+    }
+    let exe = match appimage {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_exe()?,
+    };
+    let exe = exe.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("executable path is not UTF-8: {}", exe.display()),
+        )
+    })?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&file, desktop_entry::autostart_entry(name, exe))
 }
 
 #[cfg(test)]

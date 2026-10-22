@@ -36,7 +36,8 @@ tauri-plugin-updater = "2"
 # Keep the major in step with the plugin's (`cargo tree -i reqwest`).
 reqwest = { version = "0.13", default-features = false, features = ["socks"] }
 
-[target.'cfg(not(windows))'.dependencies]
+# Windows and Linux write their start-at-login entries themselves.
+[target.'cfg(not(any(windows, target_os = "linux")))'.dependencies]
 tauri-plugin-autostart = "2"
 
 [target.'cfg(unix)'.dependencies]

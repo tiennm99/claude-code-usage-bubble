@@ -867,8 +867,8 @@ pub fn run() {
     let builder = tauri::Builder::default()
         // First, so a second instance exits before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}));
-    // Windows writes its own current-user entry (see `menu::autostart_enabled`).
-    #[cfg(not(windows))]
+    // Windows and Linux write their own entries (see `menu::autostart_enabled`).
+    #[cfg(not(any(windows, target_os = "linux")))]
     let builder = {
         let autostart = tauri_plugin_autostart::Builder::new().app_name(AUTOSTART_NAME);
         #[cfg(target_os = "macos")]
