@@ -593,7 +593,12 @@ impl Runtime {
                 // The apply may fail and keep this process running, so the
                 // automatic check must stay armed.
                 log::debug!("update check skipped while an update is applied");
-                self.send(Message::UpdateCheckDone { interval_secs });
+                // Not a failure: re-arm the full interval, as the apply
+                // either relaunches or reports its own error.
+                self.send(Message::UpdateCheckDone {
+                    interval_secs,
+                    succeeded: true,
+                });
                 return;
             }
             _ => {}
@@ -606,19 +611,21 @@ impl Runtime {
         if let Err(err) = spawned {
             log::error!("update check thread could not start: {err}");
             self.with_state(|s| s.update_status = UpdateStatus::Failed);
-            self.send(Message::UpdateCheckDone { interval_secs });
+            self.send(Message::UpdateCheckDone {
+                interval_secs,
+                succeeded: false,
+            });
             self.refresh_shell(false);
         }
     }
 
-    /// Blocking body of [`Self::check_for_updates`].
+    /// Blocking body of [`Self::check_for_updates`]. Only a check that got
+    /// an answer is stamped as the last check; a failed one leaves the
+    /// stamp alone and has the scheduler retry sooner.
     fn run_update_check(&self) {
         let proxy = update::proxy_url(net::env_proxy().as_ref(), self.http.system_proxy());
         let outcome = update::check(&self.ui.app, proxy);
-        let now_unix = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or_default();
+        let succeeded = outcome.is_ok();
         let (status, found) = match outcome {
             Ok(CheckOutcome::UpToDate) => {
                 log::info!("update check: up to date");
@@ -641,13 +648,21 @@ impl Runtime {
             .unwrap_or_else(PoisonError::into_inner) = found;
         let (snapshot, interval_secs) = self.with_state(|s| {
             s.update_status = status;
-            s.settings.last_update_check_unix = Some(now_unix);
-            (s.settings.clone(), s.settings.update_check_interval_secs)
+            let snapshot = succeeded.then(|| {
+                s.settings.last_update_check_unix = Some(scheduler::unix_now());
+                s.settings.clone()
+            });
+            (snapshot, s.settings.update_check_interval_secs)
         });
-        if let Err(err) = settings::save(&snapshot) {
-            log::warn!("settings save failed: {err}");
+        if let Some(snapshot) = snapshot {
+            if let Err(err) = settings::save(&snapshot) {
+                log::warn!("settings save failed: {err}");
+            }
         }
-        self.send(Message::UpdateCheckDone { interval_secs });
+        self.send(Message::UpdateCheckDone {
+            interval_secs,
+            succeeded,
+        });
         self.refresh_shell(false);
     }
 
