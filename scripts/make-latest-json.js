@@ -7,9 +7,9 @@
 // because the same files are uploaded next to the manifest:
 //
 // - Legacy clients (v0.5.0 and earlier) read `/releases/latest` through the
-//   GitHub API and download the asset named `claude-code-usage-bubble.exe`,
-//   else the first asset ending in `.exe`. So exactly one `.exe` asset may
-//   exist, under that exact name.
+//   GitHub API and download the asset with the exe name they were built
+//   under, else the first asset ending in `.exe`. No release carries their
+//   old name, so exactly one `.exe` asset may exist.
 // - GitHub rewrites spaces in asset names, so a name with whitespace would no
 //   longer match the URL written into the manifest.
 // - Every platform entry the app looks up must be present; a missing one
@@ -19,8 +19,8 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const REPO = 'tiennm99/claude-code-usage-bubble';
-export const WINDOWS_EXE = 'claude-code-usage-bubble.exe';
+export const REPO = 'tiennm99/usage-monitor';
+export const WINDOWS_EXE = 'usage-monitor.exe';
 export const MANIFEST_NAME = 'latest.json';
 
 const TAG_PATTERN = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
@@ -63,7 +63,7 @@ export function platformAssets(version, windowsOnly) {
   /** @type {Record<string, string>} */
   const platforms = { 'windows-x86_64': WINDOWS_EXE };
   if (!windowsOnly) {
-    platforms['linux-x86_64'] = `claude-code-usage-bubble_${version}_amd64.AppImage`;
+    platforms['linux-x86_64'] = `usage-monitor_${version}_amd64.AppImage`;
   }
   return platforms;
 }
@@ -77,7 +77,7 @@ export function platformAssets(version, windowsOnly) {
 export function expectedAssets(version, windowsOnly) {
   const names = Object.values(platformAssets(version, windowsOnly)).flatMap((n) => [n, `${n}.sig`]);
   if (!windowsOnly) {
-    names.push(`claude-code-usage-bubble_${version}_amd64.deb`);
+    names.push(`usage-monitor_${version}_amd64.deb`);
   }
   return names.sort();
 }

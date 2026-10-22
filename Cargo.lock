@@ -514,7 +514,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "claude-code-usage-bubble"
+name = "usage-monitor"
 version = "0.5.0"
 dependencies = [
  "auto-launch",

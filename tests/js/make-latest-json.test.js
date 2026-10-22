@@ -17,8 +17,8 @@ import {
 
 const TAG = 'v0.6.0';
 const VERSION = '0.6.0';
-const APPIMAGE = `claude-code-usage-bubble_${VERSION}_amd64.AppImage`;
-const DEB = `claude-code-usage-bubble_${VERSION}_amd64.deb`;
+const APPIMAGE = `usage-monitor_${VERSION}_amd64.AppImage`;
+const DEB = `usage-monitor_${VERSION}_amd64.deb`;
 const NOW = new Date('2026-10-21T09:30:00.000Z');
 
 /** @type {string} */
@@ -42,7 +42,7 @@ const put = (names) => {
   }
 };
 
-const FULL = ['claude-code-usage-bubble.exe', 'claude-code-usage-bubble.exe.sig', APPIMAGE, `${APPIMAGE}.sig`, DEB];
+const FULL = ['usage-monitor.exe', 'usage-monitor.exe.sig', APPIMAGE, `${APPIMAGE}.sig`, DEB];
 
 describe('versionFromTag', () => {
   it('strips the v and keeps a pre-release suffix', () => {
@@ -67,15 +67,15 @@ describe('run', () => {
     assert.equal(written.version, VERSION);
     assert.equal(written.pub_date, '2026-10-21T09:30:00.000Z');
     assert.deepEqual(Object.keys(written.platforms).sort(), ['linux-x86_64', 'windows-x86_64']);
-    assert.equal(written.platforms['windows-x86_64'].signature, 'sig-of-claude-code-usage-bubble.exe.sig');
+    assert.equal(written.platforms['windows-x86_64'].signature, 'sig-of-usage-monitor.exe.sig');
     assert.equal(written.platforms['linux-x86_64'].signature, `sig-of-${APPIMAGE}.sig`);
   });
 
   it('points each URL at the renamed asset of the same name', () => {
     put(FULL);
     const { platforms } = run([TAG, dir], NOW);
-    const base = 'https://github.com/tiennm99/claude-code-usage-bubble/releases/download/v0.6.0/';
-    assert.equal(platforms['windows-x86_64'].url, `${base}claude-code-usage-bubble.exe`);
+    const base = 'https://github.com/tiennm99/usage-monitor/releases/download/v0.6.0/';
+    assert.equal(platforms['windows-x86_64'].url, `${base}usage-monitor.exe`);
     assert.equal(platforms['linux-x86_64'].url, `${base}${APPIMAGE}`);
     for (const { url } of Object.values(platforms)) {
       assert.ok(FULL.includes(url.slice(base.length)), url);
@@ -83,7 +83,7 @@ describe('run', () => {
   });
 
   it('writes only the Windows entry with --windows-only', () => {
-    put(['claude-code-usage-bubble.exe', 'claude-code-usage-bubble.exe.sig']);
+    put(['usage-monitor.exe', 'usage-monitor.exe.sig']);
     const manifest = run(['--windows-only', TAG, dir], NOW);
     assert.deepEqual(Object.keys(manifest.platforms), ['windows-x86_64']);
   });
@@ -95,14 +95,14 @@ describe('run', () => {
   });
 
   it('fails on an asset name with a space', () => {
-    put([...FULL.filter((n) => n !== APPIMAGE), 'Claude Code Usage Bubble_0.6.0_amd64.AppImage']);
+    put([...FULL.filter((n) => n !== APPIMAGE), 'Usage Monitor_0.6.0_amd64.AppImage']);
     assert.throws(() => run([TAG, dir], NOW), /whitespace/);
   });
 
   it('fails on a second .exe asset, whatever its case', () => {
-    put([...FULL, 'claude-code-usage-bubble-setup.exe']);
+    put([...FULL, 'usage-monitor-setup.exe']);
     assert.throws(() => run([TAG, dir], NOW), /only \.exe asset allowed/);
-    rmSync(join(dir, 'claude-code-usage-bubble-setup.exe'));
+    rmSync(join(dir, 'usage-monitor-setup.exe'));
     put(['Other.EXE']);
     assert.throws(() => run([TAG, dir], NOW), /only \.exe asset allowed/);
   });
@@ -113,13 +113,13 @@ describe('run', () => {
   });
 
   it('fails when the AppImage carries another version', () => {
-    put([...FULL.filter((n) => !n.startsWith(APPIMAGE)), 'claude-code-usage-bubble_0.5.0_amd64.AppImage']);
+    put([...FULL.filter((n) => !n.startsWith(APPIMAGE)), 'usage-monitor_0.5.0_amd64.AppImage']);
     assert.throws(() => run([TAG, dir], NOW), /missing release assets/);
   });
 
   it('fails on an empty signature', () => {
     put(FULL);
-    writeFileSync(join(dir, 'claude-code-usage-bubble.exe.sig'), '\n');
+    writeFileSync(join(dir, 'usage-monitor.exe.sig'), '\n');
     assert.throws(() => run([TAG, dir], NOW), /exe\.sig is empty/);
   });
 
@@ -146,8 +146,8 @@ describe('checkAssetNames', () => {
 describe('assetUrl', () => {
   it('builds the release-download URL', () => {
     assert.equal(
-      assetUrl('v0.0.0-test', 'claude-code-usage-bubble.exe'),
-      'https://github.com/tiennm99/claude-code-usage-bubble/releases/download/v0.0.0-test/claude-code-usage-bubble.exe',
+      assetUrl('v0.0.0-test', 'usage-monitor.exe'),
+      'https://github.com/tiennm99/usage-monitor/releases/download/v0.0.0-test/usage-monitor.exe',
     );
   });
 });

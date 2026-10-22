@@ -21,7 +21,7 @@ corners for the hit area (D4).
 
 - **Window** (`src/bubble.rs`, rewritten):
   - Created with `WebviewWindowBuilder::new(app, "bubble-<slug>", WebviewUrl::App("bubble.html"))`.
-  - Builder options: `transparent(true)`, `decorations(false)`, `shadow(false)`, `always_on_top(true)`, `skip_taskbar(true)`, `resizable(false)`, `maximizable(false)`, `minimizable(false)`, `focused(false)`, `focusable(false)`, `visible(false)`, `title("Claude Code Usage Bubble")`.
+  - Builder options: `transparent(true)`, `decorations(false)`, `shadow(false)`, `always_on_top(true)`, `skip_taskbar(true)`, `resizable(false)`, `maximizable(false)`, `minimizable(false)`, `focused(false)`, `focusable(false)`, `visible(false)`, `title("Usage Monitor")`.
   - Size is `PhysicalSize(scale(w,dpi), scale(h_logical,dpi))`, recomputed on `ScaleFactorChanged`. Each size change re-sends the payload, whose `canvasW`, `canvasH` and `dpi` drive `layout.js` (D2).
   - Position is the saved position or `default_position` from the primary monitor's `work_area()`, then clamped.
   - Honour `widget_visible` when creating the window (intentional fix #7).

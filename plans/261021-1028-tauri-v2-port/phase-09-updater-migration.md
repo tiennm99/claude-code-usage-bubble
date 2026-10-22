@@ -14,7 +14,7 @@ dependencies: [5]
 How v0.5.0 updates today:
 
 1. It queries the GitHub API (`src/update/release.rs:48-80`) and takes the
-   asset named exactly `claude-code-usage-bubble.exe` (`release.rs:7`, `:68`),
+   asset named exactly `usage-monitor.exe` (`release.rs:7`, `:68`),
    or else the first asset ending in `*.exe`.
 2. It checks the asset's sha256 digest.
 3. It `self_replace`s its own exe, relaunches with `--wait-pid <pid>` and
@@ -34,7 +34,7 @@ self-replaces on Windows and runs the plugin's install on the AppImage.
   same commit that adds `plugins.updater` to `tauri.conf.json`, because the
   plugin's config requires `pubkey` and plugin init fails without it:
   - `pubkey`: the content of the public key generated with `npx tauri signer generate`.
-  - `endpoints`: `["https://github.com/tiennm99/claude-code-usage-bubble/releases/latest/download/latest.json"]`.
+  - `endpoints`: `["https://github.com/tiennm99/usage-monitor/releases/latest/download/latest.json"]`.
 - `tauri.conf.json` keeps `bundle.createUpdaterArtifacts: false`; `release.yml`
   enables it through `--config` (Phase 10).
 - `src/update/mod.rs` keeps the status machine (`core::state::UpdateStatus`).
@@ -54,7 +54,7 @@ self-replaces on Windows and runs the plugin's install on the AppImage.
     reach it. If the second check returns `None`, set Up to date. Then dispatch
     on the channel:
     - `Portable` (Windows): `ensure_writable` and `reject_unsafe_path` (kept),
-      write the bytes to `data_local_dir()/ClaudeCodeUsageBubble/updates/update.exe`,
+      write the bytes to `data_local_dir()/UsageMonitor/updates/update.exe`,
       call `self_replace`, delete the staged file, then
       `handoff::relaunch(&["--updated-to", v])`.
     - `AppImage` (Linux with `$APPIMAGE` set): `update.install(bytes)`, then

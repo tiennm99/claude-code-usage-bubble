@@ -10,7 +10,7 @@ use crate::core::geom::{
 };
 use crate::usage::ProviderId;
 
-pub const APP_DIR_NAME: &str = "ClaudeCodeUsageBubble";
+pub const APP_DIR_NAME: &str = "UsageMonitor";
 const SETTINGS_FILE: &str = "settings.json";
 
 pub const POLL_1_MIN: u32 = 60_000;

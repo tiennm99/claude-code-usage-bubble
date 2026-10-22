@@ -1,4 +1,4 @@
-# Full-Project Code Review — claude-code-usage-bubble v0.1.2
+# Full-Project Code Review — usage-monitor v0.1.2
 
 Scope: full src/ tree (~6.2k LOC across 35 files). Recent shipped releases 0.1.0-0.1.2; v0.1.2 fixed cmd.exe arg escaping in the self-updater.
 
@@ -69,7 +69,7 @@ Fix: validate `current_exe()` / `stage_path()` against `[A-Za-z0-9 \\:.\-_/]` be
 
 `begin` downloads the asset URL and immediately stages it for `move /y` replacement. No SHA256, signature, or even file-size sanity check. If GitHub's release CDN delivers a truncated/corrupted asset (network blip), the next launch is broken with no rollback. If an attacker controls the release-publishing pipeline (compromised PAT, repo takeover) every existing install gets RCE.
 
-Fix: ship the release with a `claude-code-usage-bubble.exe.sha256` sidecar (or use the GH API's `digest` field — populated in newer releases), download both, compare before `spawn_handoff`. Also `fsync` the staged file.
+Fix: ship the release with a `usage-monitor.exe.sha256` sidecar (or use the GH API's `digest` field — populated in newer releases), download both, compare before `spawn_handoff`. Also `fsync` the staged file.
 
 ### P1-4. Token-expiry balloon picks wrong provider when both are enabled
 `src/app.rs:715-744`

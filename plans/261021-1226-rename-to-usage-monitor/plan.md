@@ -1,15 +1,14 @@
 ---
 title: Rename to usage-monitor
 description: >-
-  Rename the repository and product from claude-code-usage-bubble to
-  usage-monitor once the Tauri port lands.
-status: pending
+  Rename the repository and product to usage-monitor, with no trace of the
+  previous name left in the repository.
+status: completed
 priority: P3
-branch: main
+branch: feat/tauri-port
 tags:
   - rename
-blockedBy:
-  - 261021-1028-tauri-v2-port
+blockedBy: []
 blocks: []
 created: '2026-10-21T05:26:00.000Z'
 ---
@@ -23,21 +22,28 @@ Both Claude Code and Codex call their quota "usage", and the name does not tie
 the app to the bubble shape or to one provider. This is a personal tool, so the
 user's preference decides the name.
 
-## Constraints
+On 2026-10-22 the user chose to remove the previous name completely rather
+than keep it for compatibility, and to do the rename before the Tauri port
+merges into `main`.
 
-- Installed legacy copies update only from an asset named
-  `claude-code-usage-bubble.exe` in `tiennm99/claude-code-usage-bubble`
-  releases. The first releases after the rename must keep publishing that
-  asset name, and the old repository URL must keep redirecting.
-- Whether the legacy WinHTTP updater follows GitHub's API redirect after a
-  repository rename is unverified. Verify it before relying on the redirect.
+## Result
 
-## Steps
+- The GitHub repository is `tiennm99/usage-monitor`, and the local checkout
+  moved to match. GitHub answers API requests for the old repository path
+  with a 301, which the legacy WinHTTP client follows.
+- The crate, binary, `productName`, identifier, settings folder, log file,
+  autostart entry, user agent, updater endpoint and release asset names all
+  use the new name.
+- Legacy Win32 clients still find updates: they fall back to the first `.exe`
+  asset when their own exe name is missing, so a release must carry exactly
+  one `.exe`. `release-legacy.yml` reads the package name from the ref it
+  builds and publishes the exe as `usage-monitor.exe`.
 
-1. Rename the GitHub repository to `tiennm99/usage-monitor` with
-   `gh repo rename`, then update `origin` and move the local checkout to
-   `tiennm99/usage-monitor`.
-2. Update the updater's repository constant, `productName`, README, release
-   workflow and docs to the new name. Keep publishing the legacy `.exe` asset
-   name alongside the new one.
-3. Confirm a legacy copy still finds the update through the redirect.
+## Accepted costs
+
+- Installs that upgrade start with default settings, because the settings
+  folder name changed and nothing migrates it.
+- On Windows, an install that had autostart on keeps its old Run entry, which
+  points at the same exe file. Turning autostart on in the new app adds a
+  second entry.
+- Update leftovers in the old local data folder are no longer cleaned up.

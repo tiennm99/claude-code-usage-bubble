@@ -2,7 +2,7 @@
 ![Linux x86_64](https://img.shields.io/badge/platform-Linux_x86__64-blue)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-# Claude Code Usage Bubble
+# Usage Monitor
 
 A floating, draggable circular bubble that shows your Claude Code and/or
 Codex usage on Windows and Linux — inspired by the floating "memory boost
@@ -87,9 +87,9 @@ and start the app again.
 
 ### Windows
 
-Grab `claude-code-usage-bubble.exe` from the
-[Releases page](https://github.com/tiennm99/claude-code-usage-bubble/releases/latest).
-Put it anywhere on disk (e.g. `%LOCALAPPDATA%\ClaudeCodeUsageBubble\`) and
+Grab `usage-monitor.exe` from the
+[Releases page](https://github.com/tiennm99/usage-monitor/releases/latest).
+Put it anywhere on disk (e.g. `%LOCALAPPDATA%\UsageMonitor\`) and
 run it. The app self-updates from the same Releases feed.
 
 **First-run note:** the binary is unsigned, so SmartScreen will show
@@ -99,13 +99,13 @@ signing is on the roadmap.
 ### Linux x86_64
 
 From the same
-[Releases page](https://github.com/tiennm99/claude-code-usage-bubble/releases/latest),
+[Releases page](https://github.com/tiennm99/usage-monitor/releases/latest),
 pick one:
 
-- `claude-code-usage-bubble_X.Y.Z_amd64.AppImage`: make it executable
+- `usage-monitor_X.Y.Z_amd64.AppImage`: make it executable
   (`chmod +x`) and run it. The AppImage self-updates in place.
-- `claude-code-usage-bubble_X.Y.Z_amd64.deb`: install it with
-  `sudo apt install ./claude-code-usage-bubble_X.Y.Z_amd64.deb`. The app
+- `usage-monitor_X.Y.Z_amd64.deb`: install it with
+  `sudo apt install ./usage-monitor_X.Y.Z_amd64.deb`. The app
   still checks for updates, but installing one is left to you: download the
   new `.deb` and install it the same way.
 
@@ -118,26 +118,26 @@ dependency, so `npm ci` installs it.
 On Windows:
 
 ```powershell
-git clone https://github.com/tiennm99/claude-code-usage-bubble
-cd claude-code-usage-bubble
+git clone https://github.com/tiennm99/usage-monitor
+cd usage-monitor
 npm ci
 npm run tauri build -- --no-bundle
 ```
 
-The binary lands at `target\release\claude-code-usage-bubble.exe`.
+The binary lands at `target\release\usage-monitor.exe`.
 
 On Linux x86_64, install the build dependencies first (Debian/Ubuntu):
 
 ```bash
 sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
   libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
-git clone https://github.com/tiennm99/claude-code-usage-bubble
-cd claude-code-usage-bubble
+git clone https://github.com/tiennm99/usage-monitor
+cd usage-monitor
 npm ci
 npm run tauri build -- --no-bundle
 ```
 
-The binary lands at `target/release/claude-code-usage-bubble`. To build the
+The binary lands at `target/release/usage-monitor`. To build the
 `.deb` and AppImage instead, also install `patchelf` (the AppImage needs it)
 and run `npm run tauri build -- --bundles deb,appimage`; they land under
 `target/release/bundle/`.
@@ -194,34 +194,34 @@ same; these differences are visible:
 ## Diagnostics
 
 ```text
-claude-code-usage-bubble.exe --diagnose     # Windows
-claude-code-usage-bubble --diagnose         # Linux .deb (pass the same flag to the AppImage)
+usage-monitor.exe --diagnose     # Windows
+usage-monitor --diagnose         # Linux .deb (pass the same flag to the AppImage)
 ```
 
 This writes a log file, truncated on each start, to:
 
 | OS | Log file |
 |----|----------|
-| Windows | `%TEMP%\claude-code-usage-bubble.log` |
-| Linux | `$TMPDIR/claude-code-usage-bubble.log`, usually `/tmp/claude-code-usage-bubble.log` |
+| Windows | `%TEMP%\usage-monitor.log` |
+| Linux | `$TMPDIR/usage-monitor.log`, usually `/tmp/usage-monitor.log` |
 
 Settings are saved to:
 
 | OS | Settings file |
 |----|---------------|
-| Windows | `%APPDATA%\ClaudeCodeUsageBubble\settings.json` |
-| Linux | `$XDG_CONFIG_HOME/ClaudeCodeUsageBubble/settings.json`, usually `~/.config/ClaudeCodeUsageBubble/settings.json` |
+| Windows | `%APPDATA%\UsageMonitor\settings.json` |
+| Linux | `$XDG_CONFIG_HOME/UsageMonitor/settings.json`, usually `~/.config/UsageMonitor/settings.json` |
 
 Other files the app writes:
 
 | What | Windows | Linux |
 |------|---------|-------|
-| Update downloads and `update-error.log` | `%LOCALAPPDATA%\ClaudeCodeUsageBubble\updates\` | `~/.local/share/ClaudeCodeUsageBubble/updates/` |
-| Web view profile (cache, storage) | `%LOCALAPPDATA%\io.github.tiennm99.claudecodeusagebubble\` (WebView2) | `~/.local/share/io.github.tiennm99.claudecodeusagebubble/` (WebKitGTK) |
+| Update downloads and `update-error.log` | `%LOCALAPPDATA%\UsageMonitor\updates\` | `~/.local/share/UsageMonitor/updates/` |
+| Web view profile (cache, storage) | `%LOCALAPPDATA%\io.github.tiennm99.usagemonitor\` (WebView2) | `~/.local/share/io.github.tiennm99.usagemonitor/` (WebKitGTK) |
 
 On Windows the app also writes its notification icon to
-`%LOCALAPPDATA%\ClaudeCodeUsageBubble\icon.png` and registers it under
-`HKCU\Software\Classes\AppUserModelId\io.github.tiennm99.claudecodeusagebubble`,
+`%LOCALAPPDATA%\UsageMonitor\icon.png` and registers it under
+`HKCU\Software\Classes\AppUserModelId\io.github.tiennm99.usagemonitor`,
 which Windows needs to show toasts from a portable exe.
 
 ## Privacy and security

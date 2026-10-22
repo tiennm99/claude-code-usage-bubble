@@ -117,7 +117,7 @@ impl LocaleStrings {
 
 fn english_strings() -> LocaleStrings {
     LocaleStrings {
-        window_title: "Claude Code Usage Bubble".into(),
+        window_title: "Usage Monitor".into(),
         refresh: "Refresh".into(),
         update_frequency: "Update frequency".into(),
         one_minute: "1 minute".into(),

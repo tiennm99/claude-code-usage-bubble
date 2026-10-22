@@ -1,4 +1,4 @@
-# Best Practices Research: claude-code-usage-bubble
+# Best Practices Research: usage-monitor
 **Date:** 2026-05-16 | **Scope:** Current Rust desktop Windows ecosystem (2025/2026)
 
 ## 1. Self-Updating Rust Apps on Windows
@@ -91,13 +91,13 @@ Current UX is acceptable for hobby indie app (<10MB binary). If you hit >5MB or 
 ## 7. Distribution to Non-Technical Users
 
 **Current state (2025/2026):**
-- **winget** ([microsoft/winget-cli](https://github.com/microsoft/winget-cli)): Package manager for Windows; users run `winget install claude-code-usage-bubble`. Submission to [github.com/microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) is free, community-driven (you submit manifest, Microsoft approves). Supports EXE, MSI, MSIX.
+- **winget** ([microsoft/winget-cli](https://github.com/microsoft/winget-cli)): Package manager for Windows; users run `winget install usage-monitor`. Submission to [github.com/microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) is free, community-driven (you submit manifest, Microsoft approves). Supports EXE, MSI, MSIX.
 - **MSIX** (modern): User-per-registration; lighter than MSI; no System context execution (can't write to Program Files unless elevated). Best for Store submission, not ideal for uninstaller scripts.
 - **MSI** (traditional): Full System-context install; larger; maturer tooling. Overkill for a single exe bubble.
 - **Plain .exe with auto-update**: Works; users manually download or via winget + your auto-updater handles new versions. Current approach.
 
 **Recommendation:**  
-Submit to **winget** (free, no certs needed for listing). Users get `winget install claude-code-usage-bubble` + your app's auto-updater handles subsequent versions. Skip MSIX/MSI unless you need managed deployment (Intune/SCCM).
+Submit to **winget** (free, no certs needed for listing). Users get `winget install usage-monitor` + your app's auto-updater handles subsequent versions. Skip MSIX/MSI unless you need managed deployment (Intune/SCCM).
 
 ---
 

@@ -14,7 +14,7 @@ dependencies: [9]
 `.github/workflows/release.yml` builds one Windows exe on tag pushes, with a
 draft release on `workflow_dispatch`. `ci.yml` already exists from Phase 01.
 
-v0.4.0 to v0.5.0 read `api.github.com/repos/tiennm99/claude-code-usage-bubble/releases/latest`,
+v0.4.0 to v0.5.0 read `api.github.com/repos/tiennm99/usage-monitor/releases/latest`,
 which skips drafts and prereleases, and draft assets are not downloadable
 without auth. No draft can exercise the migration, and the user decided against
 an end-to-end rehearsal and a throwaway repo. This phase instead checks
@@ -40,7 +40,7 @@ host has no patchelf and no display.
     cover a build step that runs without it.
   - **win-x64** job (`windows-latest`):
     - `npm run tauri build -- --no-bundle`.
-    - `npx tauri signer sign target/release/claude-code-usage-bubble.exe`. This
+    - `npx tauri signer sign target/release/usage-monitor.exe`. This
       writes a separate `.sig` and leaves the exe bytes untouched, so the GitHub
       asset digest that old clients verify is the digest of the exe they run.
     - Upload the exe and its `.sig`.
@@ -50,8 +50,8 @@ host has no patchelf and no display.
       `npm run tauri bundle -- --bundles appimage,deb --config …` with it.
     - Rename every output to space-free kebab names before upload, because the
       bundler names them after `productName` and GitHub rewrites spaces in asset
-      names: `claude-code-usage-bubble_<ver>_amd64.AppImage`, the matching
-      `.AppImage.sig`, and `claude-code-usage-bubble_<ver>_amd64.deb`. The
+      names: `usage-monitor_<ver>_amd64.AppImage`, the matching
+      `.AppImage.sig`, and `usage-monitor_<ver>_amd64.deb`. The
       signature covers the content, not the name.
   - **publish** job:
     - Download the artifacts.
@@ -60,7 +60,7 @@ host has no patchelf and no display.
       `{version, notes, pub_date, platforms:{"windows-x86_64", "linux-x86_64"}}`,
       where each entry is a release-download URL plus the `.sig` content. It
       fails on any missing entry, on any `*.exe` asset other than
-      `claude-code-usage-bubble.exe`, and on any asset name with a space (a
+      `usage-monitor.exe`, and on any asset name with a space (a
       guard that runs after the rename).
     - Then `gh release create <tag> <assets…> latest.json --generate-notes`,
       adding `--draft` for a dispatch run. A tag run is non-draft,
@@ -72,7 +72,7 @@ host has no patchelf and no display.
   `Cargo.toml` version, runs `cargo build --release --locked`, signs the exe
   with `tauri signer sign` (CLI from `npm ci --prefix current` on the default
   branch's lockfile, since the legacy ref has no `package.json`), runs `make-latest-json.js --windows-only`
-  (from the current default branch) and publishes `claude-code-usage-bubble.exe`,
+  (from the current default branch) and publishes `usage-monitor.exe`,
   its `.sig` and the Windows-only `latest.json`. The build job runs with
   `contents: read` and `persist-credentials: false` and uploads an artifact; a
   separate publish job holds `contents: write`, as in `release.yml`. Tauri Linux clients get
@@ -93,10 +93,10 @@ host has no patchelf and no display.
 
   | What the old client reads or needs | v0.4.0 | v0.4.1 | v0.5.0 | New release provides | Result |
   |------------------------------------|--------|--------|--------|----------------------|--------|
-  | Endpoint: `GET /repos/tiennm99/claude-code-usage-bubble/releases/latest` (`release.rs:8-9`, `:49`) | same | same | same | The Tauri tag release is non-draft, non-prerelease and marked latest in the same repo | pass (code): re-read at all three tags (`release.rs:8-9`, `:49`); a tag run of `release.yml` publishes without `--draft`/`--prerelease`, with `--latest`, then fails if `gh api …/releases/latest` returns another tag. Draft check: pending |
+  | Endpoint: `GET /repos/tiennm99/usage-monitor/releases/latest` (`release.rs:8-9`, `:49`) | same | same | same | The Tauri tag release is non-draft, non-prerelease and marked latest in the same repo | pass (code): re-read at all three tags (`release.rs:8-9`, `:49`); a tag run of `release.yml` publishes without `--draft`/`--prerelease`, with `--latest`, then fails if `gh api …/releases/latest` returns another tag. Draft check: pending |
   | Release JSON fields: `tag_name`, `assets[].name`, `assets[].browser_download_url`, optional `assets[].digest` (`release.rs:104-119`) | same | same | same | Standard GitHub release object; nothing from `latest.json` is read | pass (code): `release.rs:104-119` at all three tags; `gh release create` makes a standard release object |
   | Version gate: `tag_name` parsed with the suffix-ignoring compare, must be greater than the running version (`release.rs:60-63`) | same | same | same | Tag `vX.Y.Z` above `v0.5.0`, equal to `Cargo.toml` (release.yml tag check) | pass (code): `release.rs:60-63` at all three tags; the `prepare` job requires `vX.Y.Z[-suffix]` equal to `Cargo.toml`. The first Tauri tag must be above v0.5.0 (a version bump, not a workflow check) |
-  | Asset pick: name equal, ASCII case-insensitive, to `claude-code-usage-bubble.exe`, else the first asset ending in `.exe` (`release.rs:7`, `:65-74`) | same | same | same | Exactly one `*.exe` asset, named `claude-code-usage-bubble.exe`; `.exe.sig`, `.AppImage`, `.AppImage.sig`, `.deb` and `latest.json` do not end in `.exe` (`make-latest-json.js` guard) | pass (code): `release.rs:7`, `:65-74` at all three tags; `make-latest-json.js` rejects any other `.exe` (any case) and any asset outside the exact set, and runs before `gh release create`. Draft check: pending |
+  | Asset pick: name equal, ASCII case-insensitive, to `usage-monitor.exe`, else the first asset ending in `.exe` (`release.rs:7`, `:65-74`) | same | same | same | Exactly one `*.exe` asset, named `usage-monitor.exe`; `.exe.sig`, `.AppImage`, `.AppImage.sig`, `.deb` and `latest.json` do not end in `.exe` (`make-latest-json.js` guard) | pass (code): `release.rs:7`, `:65-74` at all three tags; `make-latest-json.js` rejects any other `.exe` (any case) and any asset outside the exact set, and runs before `gh release create`. Draft check: pending |
   | Checksum: SHA-256 of the downloaded body must equal `digest` `sha256:<hex>` when present (`release.rs:78`, `:86-100`; `install.rs` `download`) | `install.rs:79` | `install.rs:88` | `install.rs:88` | GitHub computes `digest` for every uploaded asset (v0.5.0 shows one); the exe is uploaded unmodified after signing, so the digest matches | pass (code): `release.rs:78`, `:86-98`; `install.rs:95` (v0.4.0) and `:104` (v0.4.1, v0.5.0) compare the body hash. `tauri signer sign` was run on this host with a throwaway key: it writes `<file>.sig` beside the binary and leaves the binary as built |
   | Download: 2xx after redirects from `browser_download_url`, whole body in memory | same | same | same | Same GitHub download URL form as today; the exe grows from about 0.75 MB to several MB, which the in-memory read handles | pass (code): `install.rs:79-108` (v0.4.0) and `:88-117` (v0.4.1, v0.5.0) read the whole body after a 2xx; the URL is GitHub's `browser_download_url` as today |
   | Swap and relaunch | Helper copy of the old exe runs `--apply-update` (`install.rs:44-45`, `:128`), waits for the parent, then starts the new exe with `--updated-to X` only (`install.rs:173`) | `self_replace` in-process, then `--wait-pid <pid> --updated-to X` (`install.rs:155-172`) | same as v0.4.1 (`install.rs:155-172`) | The Tauri exe accepts a bare start, `--updated-to X` alone, and `--wait-pid <pid> --updated-to X` (Phase 04 CLI). It never needs `--apply-update`. The v0.4.0 helper runs `run_cli` before any mutex (`main.rs:33`), and the Tauri lock is a different, per-session lock, so the helper cannot block the new instance | pass (code): v0.4.0 `install.rs:44-45`, `:128-143` (helper args), `:173` (`--updated-to` only), `main.rs:33` (`run_cli` before `app::run`; `main.rs` is identical at all three tags); v0.4.1 and v0.5.0 `install.rs:155-172`. The Tauri `src/cli.rs` `parse` accepts a bare start, `--updated-to X` and `--wait-pid <pid> --updated-to X` and ignores `--apply-update` (`unknown_flags_are_ignored`) |
@@ -148,7 +148,7 @@ host has no patchelf and no display.
 ## Implementation notes
 
 - **Dry runs not run.** Both workflows refuse to build without the signing secret, and `release.yml` also without `plugins.updater.pubkey`, which is still empty (Phase 09 step 1 is a user action). Creating draft releases was also outside what this run may touch. The table therefore says "pass (code)"; the "Draft check" items stay open until the user runs step 3.
-- **Signing flow checked locally.** With a throwaway key (deleted afterwards) and the matching `pubkey` passed through `--config`, `npm run tauri build -- --bundles deb --config '{"bundle":{"createUpdaterArtifacts":true},…}' -- --locked` produced `Claude Code Usage Bubble_<ver>_<arch>.deb` plus a `.deb.sig`, and `tauri signer sign --app-version` wrote `<binary>.sig` beside an untouched binary. The bundler also signs the deb, so the rename step copies only the AppImage, its `.sig` and the deb; the deb signature is not published (no updater entry uses it). Bundle names carry spaces, as the phase expected.
+- **Signing flow checked locally.** With a throwaway key (deleted afterwards) and the matching `pubkey` passed through `--config`, `npm run tauri build -- --bundles deb --config '{"bundle":{"createUpdaterArtifacts":true},…}' -- --locked` produced `Usage Monitor_<ver>_<arch>.deb` plus a `.deb.sig`, and `tauri signer sign --app-version` wrote `<binary>.sig` beside an untouched binary. The bundler also signs the deb, so the rename step copies only the AppImage, its `.sig` and the deb; the deb signature is not published (no updater entry uses it). Bundle names carry spaces, as the phase expected.
 - **Runner args.** `npm run tauri build -- <opts> -- --locked` hands `--locked` to cargo (checked with an invalid flag, which cargo rejected), so release builds stay locked like the old `cargo build --release --locked`.
 - **`--app-version`.** Both signing steps bind the version into the signature's trusted comment, as `tauri build` does for the AppImage, so `requireSignedVersion` can be turned on later without re-signing anything.
 - **Legacy version patch.** `release-legacy.yml` patches the first `version =` line of `Cargo.toml`, then sets the same version on the package's own `Cargo.lock` entry with `sed`, so no dependency is re-resolved. Checked on this host against an archive of v0.5.0: `cargo metadata --locked` accepts the patched lockfile without rewriting it, and rejects it when the two versions differ. The release is created with `--target` set to the built commit, so the tag lands on the legacy sources, not the default branch.
@@ -173,7 +173,7 @@ script, not against a real draft.
 
 - `actionlint` and `yamllint` are clean on all workflows.
 - `npm test` covers `make-latest-json.js`, including the two-platform shape and the second-`*.exe` failure.
-- The dry-run draft contains exactly `claude-code-usage-bubble.exe`, its `.exe.sig`, one renamed `_amd64.AppImage` with its `.sig`, one renamed `_amd64.deb` and a `latest.json` with only `windows-x86_64` and `linux-x86_64`, whose URLs match the asset names exactly.
+- The dry-run draft contains exactly `usage-monitor.exe`, its `.exe.sig`, one renamed `_amd64.AppImage` with its `.sig`, one renamed `_amd64.deb` and a `latest.json` with only `windows-x86_64` and `linux-x86_64`, whose URLs match the asset names exactly.
 - The `release-legacy.yml` draft contains the exe, its `.sig` and a Windows-only `latest.json`.
 - Every row of the compatibility table reads pass, with the tag and `file:line` it was checked against, and the residual risk is written down.
 
@@ -184,7 +184,7 @@ script, not against a real draft.
 | The legacy-to-Tauri swap fails in the field (unproven end to end) | L x H | The static table above; WebView2 guard; `update-error.log`; `release-legacy.yml` rollback. Accepted by the user in place of a rehearsal. |
 | A missing secret silently produces an unsigned build | L x H | The signing step fails hard when the env var is empty. |
 | An old client picks the wrong asset | L x H | Exactly one `*.exe` asset, enforced by `make-latest-json.js`. |
-| The Tauri release is not the one `/releases/latest` returns | L x H | Tag runs publish non-draft, non-prerelease, `--latest`; check with `gh api repos/tiennm99/claude-code-usage-bubble/releases/latest -q .tag_name` after publishing. |
+| The Tauri release is not the one `/releases/latest` returns | L x H | Tag runs publish non-draft, non-prerelease, `--latest`; check with `gh api repos/tiennm99/usage-monitor/releases/latest -q .tag_name` after publishing. |
 | A draft dry run reaches users | L x H | `/releases/latest` skips drafts; the dry-run tag carries a suffix, which the push trigger and `prepare` refuse to publish; both drafts are deleted after inspection. |
 
 ## Rollback

@@ -661,8 +661,8 @@ mod tests {
     #[test]
     fn run_value_path_is_quoted() {
         assert_eq!(
-            quoted_path(Path::new(r"D:\My Tools\claude-code-usage-bubble.exe")),
-            r#""D:\My Tools\claude-code-usage-bubble.exe""#
+            quoted_path(Path::new(r"D:\My Tools\usage-monitor.exe")),
+            r#""D:\My Tools\usage-monitor.exe""#
         );
     }
 }

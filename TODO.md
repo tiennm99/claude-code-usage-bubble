@@ -18,5 +18,3 @@ order.
    release and deletes it afterwards.
 4. **Merge into `main`.** This reaches production: the next tag publishes the
    Tauri build to existing users through self-update.
-5. **Rename to `usage-monitor`.** Follow
-   [the rename plan](plans/261021-1226-rename-to-usage-monitor/plan.md).

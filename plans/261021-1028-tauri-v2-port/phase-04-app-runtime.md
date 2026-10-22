@@ -19,7 +19,7 @@ command and event bridge. All of it lives in the lib (D1); `run()` is the entry.
 
 - Pre-Builder order inside `run()`:
   1. `--diagnose` sets up diag.
-  2. `cfg(windows)`: WebView2 guard. If `GetAvailableCoreWebView2BrowserVersionString` fails or returns empty, `platform::windows::message_box_error` shows "Claude Code Usage Bubble needs the Microsoft Edge WebView2 Runtime" plus the Evergreen download URL, then the process exits 0.
+  2. `cfg(windows)`: WebView2 guard. If `GetAvailableCoreWebView2BrowserVersionString` fails or returns empty, `platform::windows::message_box_error` shows "Usage Monitor needs the Microsoft Edge WebView2 Runtime" plus the Evergreen download URL, then the process exits 0.
   3. `--wait-pid <pid>` waits until that PID is gone, polling every 100 ms, capped at 15 s (D13). `OpenProcess`/`WaitForSingleObject` on Windows, `libc::kill(pid, 0)` on Unix. Log the wait and its outcome under `--diagnose`.
   4. Apply the Linux `GDK_BACKEND=x11` rule (D12).
   5. Register `tauri-plugin-single-instance` first, with a no-op callback.
@@ -28,7 +28,7 @@ command and event bridge. All of it lives in the lib (D1); `run()` is the entry.
 - `setup()`:
   - Load settings, drop off-screen positions against `available_monitors()`, and read the theme.
   - Build `AppState` in a `Mutex`, plus a `ui_bridge` that holds the `AppHandle`. Provide `with_state(|s| …) -> T` returning owned data; it is the only way to read state before calling Tauri (D14).
-  - Run the startup cleanup: delete `<exe filename>.old.*` siblings and, under `data_local_dir()/ClaudeCodeUsageBubble/updates/`, `update.exe` and `updater-helper-*.exe` (moved from `src/update/handoff.rs:83-108` and `src/update/install.rs:323-343` into `src/handoff.rs`, with a unit test on a temp dir). `update-error.log` is kept.
+  - Run the startup cleanup: delete `<exe filename>.old.*` siblings and, under `data_local_dir()/UsageMonitor/updates/`, `update.exe` and `updater-helper-*.exe` (moved from `src/update/handoff.rs:83-108` and `src/update/install.rs:323-343` into `src/handoff.rs`, with a unit test on a temp dir). `update-error.log` is kept.
   - Start the scheduler thread and trigger the first poll.
 - `RunEvent::ExitRequested { code: None, api }` calls `api.prevent_exit()` (D18).
 - The scheduler thread receives messages over an `mpsc` channel with `recv_timeout`:

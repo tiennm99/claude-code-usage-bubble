@@ -16,7 +16,7 @@ use ureq::{Agent, Proxy, ProxyProtocol};
 use crate::core::proxy::SystemProxy;
 
 /// Default User-Agent; a per-request `User-Agent` header replaces it.
-pub const USER_AGENT: &str = concat!("claude-code-usage-bubble/", env!("CARGO_PKG_VERSION"));
+pub const USER_AGENT: &str = concat!("usage-monitor/", env!("CARGO_PKG_VERSION"));
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -375,7 +375,7 @@ mod tests {
         let request = received(&served).to_ascii_lowercase();
         let expected = format!("user-agent: {}\r\n", USER_AGENT.to_ascii_lowercase());
         assert!(request.contains(&expected), "{request}");
-        assert!(USER_AGENT.starts_with("claude-code-usage-bubble/"));
+        assert!(USER_AGENT.starts_with("usage-monitor/"));
     }
 
     #[test]

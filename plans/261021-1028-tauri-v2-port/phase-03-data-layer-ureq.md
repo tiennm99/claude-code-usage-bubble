@@ -27,7 +27,7 @@ only two Win32 couplings: `src/net/winhttp.rs`, and the `CommandExt` import in
   - Timeouts: connect 60 s, receive 30 s, global 120 s.
   - gzip enabled.
   - TLS is rustls with the platform verifier, so corporate roots stay trusted.
-  - User-Agent `claude-code-usage-bubble/<version>`.
+  - User-Agent `usage-monitor/<version>`.
   - A per-request User-Agent replaces the agent's, as the Codex provider requires.
 - Proxy:
   - Env proxies: `net::env_proxy()` walks the variables ureq reads (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, either case) and keeps the first valid one, in ureq's order. ureq's `socks-proxy` feature is on, so a SOCKS entry such as Clash's `ALL_PROXY=socks5h://…` is used, not skipped. `NO_PROXY` applies to the chosen proxy.
@@ -61,7 +61,7 @@ only two Win32 couplings: `src/net/winhttp.rs`, and the `CommandExt` import in
 
 ## Todo
 
-- [x] `src/net/mod.rs` on ureq: same `Client`/`RequestBuilder`/`Response` surface, `Transport(String)` replaces `Win`, `http_status_as_error(false)`, connect 60 s / receive 30 s / global 120 s, gzip, rustls with the platform verifier, `claude-code-usage-bubble/<version>` User-Agent with per-request override
+- [x] `src/net/mod.rs` on ureq: same `Client`/`RequestBuilder`/`Response` surface, `Transport(String)` replaces `Win`, `http_status_as_error(false)`, connect 60 s / receive 30 s / global 120 s, gzip, rustls with the platform verifier, `usage-monitor/<version>` User-Agent with per-request override
 - [x] Proxy: env proxies from ureq; `cfg(windows)` `platform::windows::system_proxy()` reads `ProxyEnable`/`ProxyServer`/`ProxyOverride` only when no env proxy is set; `core::proxy` parses per-scheme and bare servers, `;`-split override globs and `<local>`; `Client` holds a proxied and a direct agent and picks per request
 - [x] `refresh.rs`: Windows candidates and `CREATE_NO_WINDOW` behind `cfg(windows)`; Unix `claude -p .` / `codex exec .` searched in `PATH`, `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`; child reaped on a detached thread
 - [x] `usage/mod.rs` restored (providers, registry, headers, refresh, `Error`, `UsageProvider`); `src/lib.rs` declares `creds`, `net` and `platform`

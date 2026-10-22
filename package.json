@@ -1,5 +1,5 @@
 {
-  "name": "claude-code-usage-bubble",
+  "name": "usage-monitor",
   "private": true,
   "description": "Floating bubble showing Claude Code and Codex usage",
   "license": "Apache-2.0",

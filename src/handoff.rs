@@ -66,7 +66,7 @@ fn detach(command: &mut Command) {
     command.process_group(0);
 }
 
-/// `data_local_dir()/ClaudeCodeUsageBubble/updates`, where updates are
+/// `data_local_dir()/UsageMonitor/updates`, where updates are
 /// staged and `update-error.log` lives.
 pub fn updates_dir() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join(APP_DIR_NAME).join("updates"))
@@ -153,14 +153,14 @@ mod tests {
         std::fs::create_dir_all(&install).expect("install dir");
         std::fs::create_dir_all(&updates).expect("updates dir");
 
-        let exe = install.join("claude-code-usage-bubble.exe");
+        let exe = install.join("usage-monitor.exe");
         touch(&exe);
-        touch(&install.join("claude-code-usage-bubble.exe.old.1234"));
-        touch(&install.join("claude-code-usage-bubble.exe.old.99"));
+        touch(&install.join("usage-monitor.exe.old.1234"));
+        touch(&install.join("usage-monitor.exe.old.99"));
         touch(&install.join("other.exe.old.1"));
         touch(&install.join("settings.json"));
         // A directory with a matching name is left alone.
-        std::fs::create_dir_all(install.join("claude-code-usage-bubble.exe.old.dir")).expect("dir");
+        std::fs::create_dir_all(install.join("usage-monitor.exe.old.dir")).expect("dir");
 
         touch(&updates.join("update.exe"));
         touch(&updates.join("updater-helper-4242.exe"));
@@ -172,10 +172,10 @@ mod tests {
         assert_eq!(
             names(&install),
             [
-                "claude-code-usage-bubble.exe",
-                "claude-code-usage-bubble.exe.old.dir",
                 "other.exe.old.1",
                 "settings.json",
+                "usage-monitor.exe",
+                "usage-monitor.exe.old.dir",
             ]
         );
         assert_eq!(

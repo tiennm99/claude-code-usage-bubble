@@ -58,7 +58,7 @@ User sees an occasional flash terminal window. Two paths today spawn `cmd.exe /c
 ### New instance startup additions
 
 ```rust
-// Before acquiring Global\ClaudeCodeUsageBubble mutex:
+// Before acquiring Global\UsageMonitor mutex:
 if let Some(parent_pid) = parse_wait_pid_arg() {
     let h = OpenProcess(SYNCHRONIZE, FALSE, parent_pid)?;
     WaitForSingleObject(h, 5000);              // 5s cap; proceed regardless

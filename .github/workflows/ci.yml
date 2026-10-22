@@ -67,7 +67,7 @@ jobs:
         run: |
           $match = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
           $cargoVersion = $match.Matches.Groups[1].Value
-          $info = (Get-Item target/release/claude-code-usage-bubble.exe).VersionInfo
+          $info = (Get-Item target/release/usage-monitor.exe).VersionInfo
           $info | Format-List ProductName, CompanyName, FileDescription, FileVersion, ProductVersion, LegalCopyright
           if ($info.ProductVersion -ne $cargoVersion) {
             Write-Error "ProductVersion '$($info.ProductVersion)' does not match Cargo.toml version '$cargoVersion'"
@@ -79,7 +79,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bubble-exe-${{ github.sha }}
-          path: target/release/claude-code-usage-bubble.exe
+          path: target/release/usage-monitor.exe
           retention-days: 7
           if-no-files-found: error
 

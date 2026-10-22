@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-16
 **Skill:** `/ck:brainstorm`
-**Goal:** Replace ~2,700 LOC of copied-from-upstream code in `claude-code-usage-bubble` with original implementations so attribution can be dropped honestly.
+**Goal:** Replace ~2,700 LOC of copied-from-upstream code in `usage-monitor` with original implementations so attribution can be dropped honestly.
 
 ---
 
@@ -153,7 +153,7 @@ Each TOML:
 
 ```toml
 [ui]
-window_title = "Claude Code Usage Bubble"
+window_title = "Usage Monitor"
 refresh = "Refresh"
 update_frequency = "Update frequency"
 # ...
@@ -198,8 +198,8 @@ Source draws DIB sections + GDI primitives (rectangles, text). tiny-skia uses pa
 // Write %TEMP%\bubble-swap.bat:
 //   @echo off
 //   timeout /t 2 /nobreak >nul
-//   move /y "%~dp0bubble-update.exe" "C:\Path\To\claude-code-usage-bubble.exe"
-//   start "" "C:\Path\To\claude-code-usage-bubble.exe"
+//   move /y "%~dp0bubble-update.exe" "C:\Path\To\usage-monitor.exe"
+//   start "" "C:\Path\To\usage-monitor.exe"
 //   del "%~f0"
 // Spawn cmd /c bubble-swap.bat with DETACHED_PROCESS | CREATE_NO_WINDOW
 // Exit current process
@@ -226,7 +226,7 @@ Even simpler — no .bat file at all.
 // diag/mod.rs
 pub fn init(enabled: bool) -> Result<PathBuf> {
     if !enabled { return Ok(PathBuf::new()); }
-    let path = std::env::temp_dir().join("claude-code-usage-bubble.log");
+    let path = std::env::temp_dir().join("usage-monitor.log");
     WriteLogger::init(LevelFilter::Debug, Config::default(), File::create(&path)?)?;
     Ok(path)
 }

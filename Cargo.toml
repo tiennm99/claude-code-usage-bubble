@@ -1,18 +1,18 @@
 [package]
-name = "claude-code-usage-bubble"
+name = "usage-monitor"
 version = "0.5.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Floating bubble showing Claude Code and Codex usage"
-homepage = "https://github.com/tiennm99/claude-code-usage-bubble"
-repository = "https://github.com/tiennm99/claude-code-usage-bubble"
+homepage = "https://github.com/tiennm99/usage-monitor"
+repository = "https://github.com/tiennm99/usage-monitor"
 
 [lib]
-name = "claude_code_usage_bubble_lib"
+name = "usage_monitor_lib"
 path = "src/lib.rs"
 
 [[bin]]
-name = "claude-code-usage-bubble"
+name = "usage-monitor"
 path = "src/main.rs"
 
 [dependencies]

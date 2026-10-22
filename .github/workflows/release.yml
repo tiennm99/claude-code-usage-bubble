@@ -120,7 +120,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          exe=target/release/claude-code-usage-bubble.exe
+          exe=target/release/usage-monitor.exe
           npx tauri signer sign --app-version "$VERSION" "$exe"
           test -s "$exe.sig"
 
@@ -128,8 +128,8 @@ jobs:
         with:
           name: release-win-x64
           path: |
-            target/release/claude-code-usage-bubble.exe
-            target/release/claude-code-usage-bubble.exe.sig
+            target/release/usage-monitor.exe
+            target/release/usage-monitor.exe.sig
           retention-days: 7
           if-no-files-found: error
 
@@ -201,7 +201,7 @@ jobs:
           }
           appimage=$(one target/release/bundle/appimage/*_amd64.AppImage)
           deb=$(one target/release/bundle/deb/*_amd64.deb)
-          name="claude-code-usage-bubble_${VERSION}_amd64"
+          name="usage-monitor_${VERSION}_amd64"
           mkdir -p dist
           cp "$appimage" "dist/$name.AppImage"
           cp "$appimage.sig" "dist/$name.AppImage.sig"

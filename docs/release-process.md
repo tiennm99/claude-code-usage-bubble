@@ -67,11 +67,11 @@ A release carries exactly these files and nothing else:
 
 | Asset | Built by | Read by |
 |-------|----------|---------|
-| `claude-code-usage-bubble.exe` | Windows job, `npm run tauri build -- --no-bundle` | Legacy Win32 clients (GitHub API) and Tauri Windows clients (`latest.json`) |
-| `claude-code-usage-bubble.exe.sig` | `tauri signer sign` on the exe | Tauri Windows clients |
-| `claude-code-usage-bubble_X.Y.Z_amd64.AppImage` | Linux job, `tauri bundle` | Tauri AppImage clients |
-| `claude-code-usage-bubble_X.Y.Z_amd64.AppImage.sig` | the bundler, with the signing key | Tauri AppImage clients |
-| `claude-code-usage-bubble_X.Y.Z_amd64.deb` | Linux job, `tauri bundle` | Users installing by hand (`.deb` installs check for updates but do not apply them) |
+| `usage-monitor.exe` | Windows job, `npm run tauri build -- --no-bundle` | Legacy Win32 clients (GitHub API) and Tauri Windows clients (`latest.json`) |
+| `usage-monitor.exe.sig` | `tauri signer sign` on the exe | Tauri Windows clients |
+| `usage-monitor_X.Y.Z_amd64.AppImage` | Linux job, `tauri bundle` | Tauri AppImage clients |
+| `usage-monitor_X.Y.Z_amd64.AppImage.sig` | the bundler, with the signing key | Tauri AppImage clients |
+| `usage-monitor_X.Y.Z_amd64.deb` | Linux job, `tauri bundle` | Users installing by hand (`.deb` installs check for updates but do not apply them) |
 | `latest.json` | `scripts/make-latest-json.js` in the publish job | Tauri clients, through the updater endpoint in `tauri.conf.json` |
 
 `latest.json` holds `version`, `notes`, `pub_date` and exactly two
@@ -82,11 +82,11 @@ Linux ARM64 or macOS entry.
 ### Rename rule
 
 The bundler names the Linux outputs after `productName`
-("Claude Code Usage Bubble"), and GitHub rewrites spaces in asset
+("Usage Monitor"), and GitHub rewrites spaces in asset
 names, which would break the `latest.json` URLs. The Linux job
 therefore copies the bundles to space-free kebab names before upload:
-`claude-code-usage-bubble_<version>_amd64.AppImage`, its `.sig`, and
-`claude-code-usage-bubble_<version>_amd64.deb`. The signature covers
+`usage-monitor_<version>_amd64.AppImage`, its `.sig`, and
+`usage-monitor_<version>_amd64.deb`. The signature covers
 the file content, not its name, so renaming keeps it valid. The
 bundler also signs the deb, but that signature is not published,
 because no updater entry uses it.
@@ -97,13 +97,16 @@ Clients from v0.5.0 and earlier read `/releases/latest` through the
 GitHub API, which skips drafts and prereleases. Checked against their
 updater code at v0.4.0, v0.4.1 and v0.5.0, they need:
 
-- A non-draft, non-prerelease release marked latest in this repo.
+- A non-draft, non-prerelease release marked latest in this repo. They
+  query the repository's name from before the rename; GitHub answers that
+  API request with a 301 to the current repository, which WinHTTP follows.
 - A `tag_name` of plain `vX.Y.Z`, higher than the running version
   (suffixes are ignored when comparing). The first Tauri release must
   therefore be above v0.5.0.
-- An asset named `claude-code-usage-bubble.exe` (matched
-  case-insensitively), else the first asset ending in `.exe`. The
-  release must carry exactly one `.exe` asset, under that name. The
+- An `.exe` asset. They look first for the exe name they were built
+  under, which no release carries since the rename, then take the first
+  asset ending in `.exe`. The release must therefore carry exactly one
+  `.exe` asset, `usage-monitor.exe`. The
   `.exe.sig`, AppImage, deb and `latest.json` do not end in `.exe`.
 - The exe uploaded unmodified, so the `digest` (`sha256:<hex>`) that
   GitHub computes matches the downloaded body they hash. `tauri signer
@@ -115,9 +118,14 @@ updater code at v0.4.0, v0.4.1 and v0.5.0, they need:
   deletes the `<exe>.old.<pid>`, `updates/update.exe` and
   `updates/updater-helper-*.exe` files they leave behind.
 
+Since the rename, an upgraded install starts with default settings and
+keeps any autostart entry the legacy app registered: the settings folder
+and autostart entry names changed, and nothing migrates them. See
+[the rename plan](../plans/261021-1226-rename-to-usage-monitor/plan.md).
+
 `scripts/make-latest-json.js` enforces the asset rules before
 `gh release create` runs: it fails on a missing platform entry or
-signature, on any `.exe` other than `claude-code-usage-bubble.exe`
+signature, on any `.exe` other than `usage-monitor.exe`
 (in any case), on any asset name with a space, and on any file outside
 the exact set above. Tauri clients read only `latest.json`, whose URLs
 must equal the asset names exactly.
@@ -175,7 +183,7 @@ is available only after the Tauri port merges into `main`:
    dependency. It builds with `cargo build --release --locked`, signs
    the exe with the same updater key and writes a Windows-only
    `latest.json`. Check the draft:
-   it holds `claude-code-usage-bubble.exe`, its `.sig` and `latest.json`.
+   it holds `usage-monitor.exe`, its `.sig` and `latest.json`.
 4. Publish it: either edit the draft into a release marked latest, or
    delete the draft and re-run the workflow with `draft` set to `false`,
    which publishes it as latest.

@@ -20,11 +20,11 @@ stay on disk until the phase that replaces each one deletes it.
 
 ## Requirements
 
-- Single root package (D1). `[lib] name = "claude_code_usage_bubble_lib"`,
-  `path = "src/lib.rs"`; `[[bin]] name = "claude-code-usage-bubble"`.
+- Single root package (D1). `[lib] name = "usage_monitor_lib"`,
+  `path = "src/lib.rs"`; `[[bin]] name = "usage-monitor"`.
   `src/main.rs` only holds
   `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` and a call
-  to `claude_code_usage_bubble_lib::run()`.
+  to `usage_monitor_lib::run()`.
 - `tauri.conf.json` at the root: `build.frontendDist: "ui"`,
   `app.withGlobalTauri: true`, no `devUrl`, `app.windows: []`.
 - `productName`, `mainBinaryName` and `identifier` as in D16. No `version` key.
@@ -89,7 +89,7 @@ stay on disk until the phase that replaces each one deletes it.
     `npm run lint`, `npm test`, `npm run tauri build -- --no-bundle`.
   - The Linux row also runs `npm run tauri build -- --bundles deb` (no
     patchelf needed), so a broken `bundle.icon` list fails before release.
-  - The Windows row uploads `target/release/claude-code-usage-bubble.exe` with
+  - The Windows row uploads `target/release/usage-monitor.exe` with
     `actions/upload-artifact` (name `bubble-exe-<sha>`, `retention-days: 7`).
   - Row `macos-latest`: toolchain, cache, `cargo check --all-targets --locked`
     only (the macOS compile gate; `ui/` must exist, nothing else is needed).

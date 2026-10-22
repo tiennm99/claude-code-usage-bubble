@@ -105,9 +105,17 @@ jobs:
             echo "::error::Cargo.toml version is '$actual' after patching, expected '$VERSION'."
             exit 1
           fi
-          sed -i -E '/^name = "claude-code-usage-bubble"\r?$/{n;s/^version = "[^"]*"(\r?)$/version = "'"$VERSION"'"\1/}' Cargo.lock
-          if ! tr -d '\r' < Cargo.lock | grep -A1 -x 'name = "claude-code-usage-bubble"' | grep -qx "version = \"$VERSION\""; then
-            echo "::error::Cargo.lock has no claude-code-usage-bubble entry at version '$VERSION' after patching."
+          # Refs from before the rename use the old package name, so read it
+          # from the ref instead of naming it here.
+          crate=$(tr -d '\r' < Cargo.toml | sed -nE 's/^name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' | head -n 1)
+          if [ -z "$crate" ]; then
+            echo "::error::Cargo.toml has no package name."
+            exit 1
+          fi
+          echo "CRATE=$crate" >> "$GITHUB_ENV"
+          sed -i -E '/^name = "'"$crate"'"\r?$/{n;s/^version = "[^"]*"(\r?)$/version = "'"$VERSION"'"\1/}' Cargo.lock
+          if ! tr -d '\r' < Cargo.lock | grep -A1 -x "name = \"$crate\"" | grep -qx "version = \"$VERSION\""; then
+            echo "::error::Cargo.lock has no $crate entry at version '$VERSION' after patching."
             exit 1
           fi
 
@@ -118,8 +126,13 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        # The release always carries the exe as `usage-monitor.exe`, whatever
+        # the ref named it, and a copy keeps the bytes the digest covers.
         run: |
-          exe=target/release/claude-code-usage-bubble.exe
+          exe=target/release/usage-monitor.exe
+          if [ "$CRATE" != usage-monitor ]; then
+            cp "target/release/$CRATE.exe" "$exe"
+          fi
           npm exec --prefix current --no -- tauri signer sign --app-version "$VERSION" "$exe"
           test -s "$exe.sig"
 
@@ -127,8 +140,8 @@ jobs:
         with:
           name: release-legacy-win-x64
           path: |
-            target/release/claude-code-usage-bubble.exe
-            target/release/claude-code-usage-bubble.exe.sig
+            target/release/usage-monitor.exe
+            target/release/usage-monitor.exe.sig
           retention-days: 7
           if-no-files-found: error
 

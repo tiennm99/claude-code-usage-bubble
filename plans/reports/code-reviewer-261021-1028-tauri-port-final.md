@@ -50,7 +50,7 @@ plan.md "Intentionally changed behaviour" list:
 ## 2. CI
 
 Latest run on `feat/tauri-port` (HEAD `6407e49`, after this audit's doc fix):
-<https://github.com/tiennm99/claude-code-usage-bubble/actions/runs/39590034376>
+<https://github.com/tiennm99/usage-monitor/actions/runs/39590034376>
 is **success**. `windows-latest` ran fmt, clippy, tests, lint, `npm test`, the
 no-bundle build, the version-resource check and the exe artifact.
 `ubuntu-22.04` ran the same plus the deb bundle. `macos-latest` ran
@@ -103,7 +103,7 @@ OK. `cargo test --locked` passed 216, with 1 ignored. `npm run lint` OK.
     - A Task Manager disable survives two launches.
 12. **Instances:** a second launch exits silently. Restart relaunches and the old process is gone. Exit ends the process.
 13. **No WebView2:** in Windows Sandbox or an LTSC VM, the exe shows the download-link message box and exits.
-14. **Diagnostics:** `--diagnose` writes `%TEMP%\claude-code-usage-bubble.log`.
+14. **Diagnostics:** `--diagnose` writes `%TEMP%\usage-monitor.log`.
 15. **Legacy update (after the first real release):** v0.4.0, v0.4.1 and v0.5.0 each self-update into the Tauri exe. Settings and autostart are kept, and the `.old.*` and `updater-helper-*` leftovers are cleaned up.
 
 ## Unresolved questions

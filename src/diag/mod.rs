@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use simplelog::{CombinedLogger, ConfigBuilder, LevelFilter, WriteLogger};
 
-const LOG_FILE_NAME: &str = "claude-code-usage-bubble.log";
+const LOG_FILE_NAME: &str = "usage-monitor.log";
 
 /// The updater plugin logs the proxy URL, credentials included, at debug
 /// level, so its messages are kept to info and above.

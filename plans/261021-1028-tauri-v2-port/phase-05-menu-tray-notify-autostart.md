@@ -17,7 +17,7 @@ These replace the following Win32 pieces:
 - `src/tray/callback.rs`.
 - The `pixmap_to_hicon` block in `src/tray/badge.rs`.
 - The `TrackPopupMenu` menu (`src/app.rs:923-1193`), which calls `SetForegroundWindow(owner)` first (`src/app.rs:1151-1152`).
-- The Run-key autostart (`src/app.rs:1514-1527`, value name `ClaudeCodeUsageBubble` at `src/app.rs:51`).
+- The Run-key autostart (`src/app.rs:1514-1527`, value name `UsageMonitor` at `src/app.rs:51`).
 
 The user approved `tauri-plugin-notification` with Windows AUMID registration
 for the alerts (D9).
@@ -41,10 +41,10 @@ for the alerts (D9).
   - Linux: before building any tray, probe with `libloading` for the names the tray backend loads, in its order: `libayatana-appindicator3.so.1`, `libappindicator3.so.1`, then the unversioned `libayatana-appindicator3.so` and `libappindicator3.so` (its default `backcompat` feature; sometimes the only names in an AppImage). The loaded library stays loaded. If none loads, log it and skip tray creation, because the tray library panics on a missing library and the release profile aborts on panic. Any other tray creation error is logged and the app continues.
 - **Alerts** (D9):
   - Windows spike first: a fresh portable exe (CI artifact, no Start-menu shortcut, outside `target/`) on Windows 10 and 11 calls `platform::windows::register_aumid()` and shows one toast. If no toast appears, stop and report to the user before writing more alert code.
-  - `register_aumid()` runs at startup before any toast: write `HKCU\Software\Classes\AppUserModelId\io.github.tiennm99.claudecodeusagebubble` with `DisplayName` "Claude Code Usage Bubble" and `IconUri` pointing at a PNG written to `data_local_dir()/ClaudeCodeUsageBubble/icon.png`, then `SetCurrentProcessExplicitAppUserModelID` with the same id.
+  - `register_aumid()` runs at startup before any toast: write `HKCU\Software\Classes\AppUserModelId\io.github.tiennm99.usagemonitor` with `DisplayName` "Usage Monitor" and `IconUri` pointing at a PNG written to `data_local_dir()/UsageMonitor/icon.png`, then `SetCurrentProcessExplicitAppUserModelID` with the same id.
   - `tauri-plugin-notification` shows the alerts returned by `apply_results` and the pending "Update applied" alert from `--updated-to`. The update-applied alert ignores the cooldown.
 - **Autostart** (D10):
-  - `tauri_plugin_autostart::Builder::new().app_name("ClaudeCodeUsageBubble")`, `MacosLauncher::LaunchAgent`, no args. Pin the Windows current-user mode if the Builder exposes it.
+  - `tauri_plugin_autostart::Builder::new().app_name("UsageMonitor")`, `MacosLauncher::LaunchAgent`, no args. Pin the Windows current-user mode if the Builder exposes it.
   - On the pinned plugin version, read its Windows source and record in this file: what data `enable()` writes, whether `is_enabled()` compares the data, and whether `enable()` writes StartupApproved. If `is_enabled()` ignores the data, no migration code is written. Otherwise add the one-time data rewrite from D10 (legacy data exactly `"<current exe>"` and different from the plugin format), done through `platform::windows`, never touching StartupApproved.
   - Confirm that the Linux `.desktop` `Exec` uses `$APPIMAGE` when that variable is set. Otherwise, write the entry ourselves.
 - **Provider toggle:** keeps the at-least-one invariant, creates or destroys the bubble (Phase 06's `bubble::create`/`destroy`, stubbed until then; D18), syncs the tray, refreshes the menu and polls.
@@ -69,8 +69,8 @@ for the alerts (D9).
 - [x] Headless menu test: the full tree (order, labels, ids, check and grey states) walked in `core::menu_model`
 - [x] `src/tray.rs`: one `TrayIconBuilder::with_id(slug)` per enabled live provider in `LIVE_USAGE` order, `show_menu_on_left_click(false)`, left `Click`/`Up` toggles the widget, badge always dark, tooltip from `tray_tooltip` cut to 127 UTF-16 units, `set_icon`/`set_tooltip` only on a changed `(pct, colour)` or text
 - [x] Linux: `platform::linux::appindicator_available()` probes `libayatana-appindicator3.so.1`, `libappindicator3.so.1`, `libayatana-appindicator3.so`, then `libappindicator3.so` (the backend's order); without any the tray is skipped and logged; other tray errors are logged
-- [x] Autostart plugin with `app_name("ClaudeCodeUsageBubble")`, no args, `MacosLauncher::LaunchAgent` on macOS (Linux and macOS); Windows pinned to a current-user entry with the quoted exe path through `auto-launch` directly (notes below); no migration code needed
-- [x] `platform::windows::register_aumid()` (HKCU `AppUserModelId` key with `DisplayName` and `IconUri`, PNG under `data_local_dir()/ClaudeCodeUsageBubble/icon.png`, `SetCurrentProcessExplicitAppUserModelID`) run in `setup()` before any toast
+- [x] Autostart plugin with `app_name("UsageMonitor")`, no args, `MacosLauncher::LaunchAgent` on macOS (Linux and macOS); Windows pinned to a current-user entry with the quoted exe path through `auto-launch` directly (notes below); no migration code needed
+- [x] `platform::windows::register_aumid()` (HKCU `AppUserModelId` key with `DisplayName` and `IconUri`, PNG under `data_local_dir()/UsageMonitor/icon.png`, `SetCurrentProcessExplicitAppUserModelID`) run in `setup()` before any toast
 - [x] `tauri-plugin-notification` shows the `apply_results` and session-expired alerts and the pending "Update applied" alert (no cooldown), after the first tray sync
 - [x] Provider toggle: at-least-one invariant, bubble window created or destroyed (stand-in window until the real bubble), tray sync, menu rebuild, poll
 - [x] `propagate()` now syncs the trays and rebuilds the menus when the tree changed
@@ -86,7 +86,7 @@ for the alerts (D9).
   - Windows `is_enabled()` only checks that the `Run` value exists (in HKLM or HKCU) and is not disabled in `StartupApproved\Run`; it never compares the data. A legacy entry therefore shows checked and no data rewrite is written.
   - Windows `enable()` also writes the "enabled" bytes to `StartupApproved\Run` when that key exists. That only happens when the user ticks the item, which is the user re-enabling; our own code never touches `StartupApproved`, and `is_enabled()` honours a Task Manager disable.
   - The plugin Builder does not expose the Windows enable mode, so the plugin would use `auto-launch`'s default `Dynamic`: `enable()` tries HKLM first, so an elevated tick writes an all-users entry that a normal untick cannot remove (`disable()` ignores the HKLM access-denied error and `is_enabled()` still finds it), and that entry holds the unquoted path. Windows therefore does not register the plugin: `platform::windows::autostart_entry` builds an `auto_launch::AutoLaunch` with `WindowsEnableMode::CurrentUser` and the quoted exe path. Its data is `"<exe>" ` (the legacy quoted path plus the trailing space `auto-launch` always appends); `is_enabled()` is unchanged (value present in HKLM or HKCU, not disabled in `StartupApproved\Run`), so a legacy entry still shows checked. Linux and macOS keep the plugin (D10).
-  - Linux `enable()` writes `~/.config/autostart/ClaudeCodeUsageBubble.desktop`, and the plugin uses `$APPIMAGE` (Tauri's `env().appimage`) as the path when it is set, so no entry of our own is needed. The `Exec` path is not quoted.
+  - Linux `enable()` writes `~/.config/autostart/UsageMonitor.desktop`, and the plugin uses `$APPIMAGE` (Tauri's `env().appimage`) as the path when it is set, so no entry of our own is needed. The `Exec` path is not quoted.
 - `menu::refresh` is `Runtime::refresh_shell(force)`: on the main thread it snapshots state (lock released before any Tauri call), then syncs the trays and, when the menu tree differs from the last one applied (or after any menu click), gives every tray a freshly built menu. Countdown ticks and polls therefore rebuild no menu unless something in it changed. The snapshot is taken inside the main-thread closure because a closure queued from a worker runs after one a menu click runs inline; a snapshot taken on the calling thread could otherwise re-apply a stale tree and recreate a removed tray icon.
 - The left-click handler is registered once on the Tauri builder (`Builder::on_tray_icon_event`), not per icon: Tauri calls a per-icon handler while holding the per-icon listener table, and the inline main-thread refresh may build a missing icon, whose registration locks that same table (a same-thread deadlock).
 - Each tray gets its own `Menu` instance; the bubble right-click builds a fresh one and pops it from the main thread after the async command returns.
@@ -105,7 +105,7 @@ for the alerts (D9).
   - Toggle a provider off and on from the tray menu, once slowly and once quickly: the app does not hang, and exactly one bubble and one tray icon come back.
   - Tick "Start with Windows" from an elevated run: only `HKCU\…\Run` gets the value, with the quoted path; a normal run can untick it.
   - The bubble right-click menu dismisses on a click elsewhere.
-  - With a legacy `ClaudeCodeUsageBubble` Run value preset, the item shows checked, and there is exactly one entry after two launches. After a Task Manager disable, the item stays unchecked across two launches.
+  - With a legacy `UsageMonitor` Run value preset, the item shows checked, and there is exactly one entry after two launches. After a Task Manager disable, the item stays unchecked across two launches.
   - Threshold, session-expired and update-applied toasts appear from a fresh portable exe with no shortcut.
 
 ## Risks

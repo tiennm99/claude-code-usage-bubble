@@ -1,4 +1,4 @@
-//! Claude Code Usage Bubble on Tauri v2.
+//! Usage Monitor on Tauri v2.
 //!
 //! The binary in `src/main.rs` only calls [`run`]. Every module is `pub` so
 //! that items wired up incrementally do not trip `dead_code`.

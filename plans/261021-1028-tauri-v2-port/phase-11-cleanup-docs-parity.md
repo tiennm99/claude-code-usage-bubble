@@ -31,7 +31,7 @@ parity checklist before the first Tauri release.
 - `docs/release-process.md`:
   - The version lives in `Cargo.toml` only (`tauri.conf.json` inherits it). Bump it, then run `cargo build` to refresh `Cargo.lock`.
   - Signing-key custody and secrets, with an offline backup.
-  - The asset contract: the exact `claude-code-usage-bubble.exe`, with no other `*.exe`, plus `.sig` files and `latest.json`.
+  - The asset contract: the exact `usage-monitor.exe`, with no other `*.exe`, plus `.sig` files and `latest.json`.
   - The dry-run steps, the asset rename rule, the legacy-client asset contract from the Phase 10 compatibility table, its residual risk (no end-to-end rehearsal), and the `release-legacy.yml` rollback procedure.
 - No plan IDs or phase numbers in code comments or commit messages.
 
@@ -51,7 +51,7 @@ parity checklist before the first Tauri release.
 - [ ] The Phase 10 legacy-client compatibility table has every row marked pass for v0.4.0, v0.4.1 and v0.5.0, and the residual risk is recorded.
 - [ ] A second launch exits silently. Restart relaunches (and the old process is gone). Exit ends the process.
 - [ ] Without the WebView2 runtime (Windows Sandbox or an LTSC VM), the exe shows the message box with the download link and exits.
-- [ ] `--diagnose` writes `%TEMP%\claude-code-usage-bubble.log`.
+- [ ] `--diagnose` writes `%TEMP%\usage-monitor.log`.
 
 ## Files
 

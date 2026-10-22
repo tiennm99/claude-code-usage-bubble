@@ -1,8 +1,8 @@
-# Derivation audit: claude-code-usage-bubble vs Claude-Code-Usage-Monitor
+# Derivation audit: usage-monitor vs Claude-Code-Usage-Monitor
 
 **Date:** 2026-05-16
 **Source repo:** `/config/workspace/CodeZeno/Claude-Code-Usage-Monitor` — MIT, "Copyright (c) 2025 Craig Constable" per `LICENSE` (note: NOTICE in new repo claims "2026 Code Zeno Pty Ltd"; the actual upstream LICENSE names a person)
-**New repo:** `/config/workspace/tiennm99/claude-code-usage-bubble` — Apache-2.0 with NOTICE
+**New repo:** `/config/workspace/tiennm99/usage-monitor` — Apache-2.0 with NOTICE
 **Method:** byte comparison (`cmp -s`), `diff -u`, longest-contiguous-identical-run analysis (Python), line-set intersection (`comm -12`).
 
 ---
@@ -24,14 +24,14 @@
 | `src/localization/korean.rs` | 46 | **COPY** | 100% | Byte-identical. |
 | `src/localization/spanish.rs` | 46 | **COPY** | 100% | Byte-identical. |
 | `src/localization/traditional_chinese.rs` | 46 | **COPY** | 100% | Byte-identical. |
-| `src/updater.rs` | 512 | **PATCH** | ~95% | 33-line diff. Changes: `RELEASE_ASSET_NAME`/`WINGET_PACKAGE_ID` renamed, `current_install_channel()` short-circuits to `Portable`, `ClaudeCodeUsageMonitor` -> `ClaudeCodeUsageBubble` in cache dir, three `#[allow(dead_code)]` attributes added. Algorithm and structure intact. |
-| `src/diagnose.rs` | 52 | **PATCH** | ~98% | Single-line rename: log file `claude-code-usage-monitor.log` -> `claude-code-usage-bubble.log`. Otherwise identical. |
+| `src/updater.rs` | 512 | **PATCH** | ~95% | 33-line diff. Changes: `RELEASE_ASSET_NAME`/`WINGET_PACKAGE_ID` renamed, `current_install_channel()` short-circuits to `Portable`, `ClaudeCodeUsageMonitor` -> `UsageMonitor` in cache dir, three `#[allow(dead_code)]` attributes added. Algorithm and structure intact. |
+| `src/diagnose.rs` | 52 | **PATCH** | ~98% | Single-line rename: log file `claude-code-usage-monitor.log` -> `usage-monitor.log`. Otherwise identical. |
 | `src/native_interop.rs` | 71 | **PATCH** | trimmed (108 LOC dropped) | Removed taskbar-embedding helpers (`find_taskbar`, `find_child_window`, `get_taskbar_rect`, `embed_in_taskbar`, WinEvent hooks). Kept `Color` struct, `colorref`, `wide_str`, `move_window`, `get_window_rect_safe`, timer/WM_APP constants — all verbatim names, signatures, bodies. Added two new timer/message consts (`TIMER_FULLSCREEN_CHECK`, `WM_APP_PANEL_TOGGLE`, `WM_APP_PANEL_CLOSE`). What remains is a verbatim subset of upstream. |
 | `src/main.rs` | 49 | **PATCH** | ~50% | Same shape (parse `--diagnose`, init logging, dispatch to UI). Module list expanded; `window::run()` -> `app::run()`; an `if let Ok(path) = ...` refactor replacing `match`. Modules `app`, `bubble`, `panel`, `settings`, `diag`, `net`, `os` added; `window` removed. |
 | `src/app.rs` | 1354 | **REWRITE** | ~25% line-set overlap with upstream `window.rs` | Carved out of upstream's 2847-LOC `window.rs`. Shares constants (`STARTUP_REGISTRY_PATH`, `STARTUP_VALUE_NAME`, `RETRY_BASE_MS`, `UPDATE_CHECK_INTERVAL_SECS`) and short adapted blocks (mutex setup, ~10 contiguous lines max). Structure genuinely reworked but lifts named consts, message-pump idioms, and update-scheduler logic. Fair-use derivative — *not* clean-room. |
 | `src/bubble.rs` | 817 | **REWRITE** | ~23% line-set overlap | New floating-bubble window (popup + layered alpha, hit-testing). Borrows Win32 boilerplate (`SendMessageW(WM_SETICON, ...)`, `ExtractIconExW`, `GetDpiForWindow`); longest contiguous identical run is 16 lines of icon-attach plumbing. Core bubble rendering (per-pixel alpha, circle hit-test) is original. |
 | `src/panel.rs` | 506 | **REWRITE** | ~24% line-set overlap | New popup panel for the expanded view. Longest identical run = 8 lines (generic GDI boilerplate). Original UI design (horizontal bars, session/weekly). |
-| `src/settings.rs` | 140 | **REWRITE** | ~26% line-set overlap (mostly `serde` boilerplate) | New `Settings` struct with `BubblePositions`, persisted to JSON in `%LOCALAPPDATA%\ClaudeCodeUsageBubble`. Mostly original; longest identical run = 4 lines. |
+| `src/settings.rs` | 140 | **REWRITE** | ~26% line-set overlap (mostly `serde` boilerplate) | New `Settings` struct with `BubblePositions`, persisted to JSON in `%LOCALAPPDATA%\UsageMonitor`. Mostly original; longest identical run = 4 lines. |
 | `src/diag/mod.rs` | 29 | **ORIGINAL** | 0% | New `log` + `simplelog` facade. No upstream counterpart. Parallels (not replaces) upstream's `diagnose.rs` which still exists in both. |
 | `src/os/mod.rs` | 14 | **ORIGINAL** | 0% | New. |
 | `src/os/string.rs` | 10 | **ORIGINAL** | 0% | New. |
@@ -117,4 +117,4 @@ The plan's framing as a "clean-room rewrite" is technically inaccurate today: th
 3. Should `res/icon.rc`'s `CompanyName "tiennm99"` instead read something acknowledging the upstream icon copyright? The `.ico` is byte-identical to upstream's. The PE VERSIONINFO block is the public-facing metadata users see in Properties dialogs.
 
 **Status:** DONE
-**Summary:** Forensic audit complete. ~34% of the new repo is byte-identical copy of upstream; another ~11% is trivially renamed; ~43% is structural derivative; only ~12% is fully original. NOTICE is legally required and has a copyright-name defect; can only be safely removed after the plan's Phase 6 retires the last COPY/PATCH files. Report written to `/config/workspace/tiennm99/claude-code-usage-bubble/plans/reports/derivation-audit-260516-0747.md`.
+**Summary:** Forensic audit complete. ~34% of the new repo is byte-identical copy of upstream; another ~11% is trivially renamed; ~43% is structural derivative; only ~12% is fully original. NOTICE is legally required and has a copyright-name defect; can only be safely removed after the plan's Phase 6 retires the last COPY/PATCH files. Report written to `/config/workspace/tiennm99/usage-monitor/plans/reports/derivation-audit-260516-0747.md`.

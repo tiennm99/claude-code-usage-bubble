@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(
             config.pointer("/plugins/updater/endpoints"),
             Some(&serde_json::json!([
-                "https://github.com/tiennm99/claude-code-usage-bubble/releases/latest/download/latest.json"
+                "https://github.com/tiennm99/usage-monitor/releases/latest/download/latest.json"
             ]))
         );
         // The plugin parses this when it is registered; a parse error

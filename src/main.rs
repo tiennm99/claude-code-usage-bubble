@@ -3,5 +3,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    claude_code_usage_bubble_lib::run();
+    usage_monitor_lib::run();
 }

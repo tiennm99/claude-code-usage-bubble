@@ -5,9 +5,9 @@ Scope: Visual-only redesign of the stadium bubble (head ring + tail bars).
 Constraints: tiny-skia primitives only (AA fills, AA stroked arcs, AA pills) + GDI text. No new deps. No animations beyond existing pulse. Logical px values; `scale_to_dpi` handles HiDPI.
 
 Files reviewed:
-- `D:\tiennm99\claude-code-usage-bubble\src\bubble.rs` (lines 1032–1703)
-- `D:\tiennm99\claude-code-usage-bubble\src\usage_color.rs`
-- `D:\tiennm99\claude-code-usage-bubble\src\os\color.rs`
+- `D:\tiennm99\usage-monitor\src\bubble.rs` (lines 1032–1703)
+- `D:\tiennm99\usage-monitor\src\usage_color.rs`
+- `D:\tiennm99\usage-monitor\src\os\color.rs`
 
 ---
 

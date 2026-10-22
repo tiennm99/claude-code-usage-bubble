@@ -20,7 +20,7 @@ that window's class is in the ignore list, it is cloaked, or it is minimized.
 
 - `platform::foreground_is_fullscreen() -> (bool, &'static str reason)`:
   - **Windows:** the existing evaluation, copied verbatim, with one change: the
-    `ClaudeCodeUsageBubble` class check becomes "the foreground window belongs
+    `UsageMonitor` class check becomes "the foreground window belongs
     to our own process" (`GetWindowThreadProcessId` compared with
     `std::process::id()`). The `Progman`, `WorkerW` and `Shell_TrayWnd` class
     checks stay. Uses `rect_covers_monitor` and the style bits from `core::geom`.

@@ -53,12 +53,12 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Name of the start-at-login entry: the Windows `Run` value name of every
 /// earlier release, so an existing entry is already the plugin's entry.
-pub const AUTOSTART_NAME: &str = "ClaudeCodeUsageBubble";
+pub const AUTOSTART_NAME: &str = "UsageMonitor";
 
 #[cfg(windows)]
-const WEBVIEW2_MISSING_TITLE: &str = "Claude Code Usage Bubble";
+const WEBVIEW2_MISSING_TITLE: &str = "Usage Monitor";
 #[cfg(windows)]
-const WEBVIEW2_MISSING_TEXT: &str = "Claude Code Usage Bubble needs the Microsoft Edge \
+const WEBVIEW2_MISSING_TEXT: &str = "Usage Monitor needs the Microsoft Edge \
 WebView2 Runtime.\n\nDownload the Evergreen runtime from:\n\
 https://developer.microsoft.com/microsoft-edge/webview2/";
 
@@ -905,7 +905,7 @@ pub fn run() {
         Ok(app) => app,
         Err(err) => {
             log::error!("tauri builder failed: {err}");
-            eprintln!("Claude Code Usage Bubble failed to start: {err}");
+            eprintln!("Usage Monitor failed to start: {err}");
             std::process::exit(1);
         }
     };
@@ -1015,10 +1015,7 @@ fn register_notification_identity(app: &AppHandle) {
         return;
     };
     let config = app.config();
-    let name = config
-        .product_name
-        .as_deref()
-        .unwrap_or("Claude Code Usage Bubble");
+    let name = config.product_name.as_deref().unwrap_or("Usage Monitor");
     match platform::windows::register_aumid(&config.identifier, name, ICON_PNG, &icon_path) {
         Ok(()) => log::info!("notification app id {} registered", config.identifier),
         Err(err) => log::warn!("notification app id registration incomplete: {err}"),

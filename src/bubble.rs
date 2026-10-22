@@ -39,7 +39,7 @@ const READY_FALLBACK: Duration = Duration::from_millis(1500);
 #[cfg(not(windows))]
 const MOVE_END_DEBOUNCE: Duration = Duration::from_millis(250);
 
-const TITLE: &str = "Claude Code Usage Bubble";
+const TITLE: &str = "Usage Monitor";
 
 /// Work area used when no monitor can be enumerated.
 const FALLBACK_SCREEN: Rect = Rect::new(0, 0, 1920, 1080);

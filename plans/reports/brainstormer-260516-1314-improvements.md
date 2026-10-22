@@ -1,4 +1,4 @@
-# Brainstorm: high-leverage improvements for claude-code-usage-bubble
+# Brainstorm: high-leverage improvements for usage-monitor
 
 Date: 2026-05-16
 Baseline: v0.1.2 — bubble UX just polished (commits 5df75c9...7f8ccf0), updater bug just fixed (a132c02), auto-update frequency just added (2ca5052), windows release pipeline just added (60cde29).
@@ -96,7 +96,7 @@ Only worthwhile if you want strangers using it. State the goal explicitly before
 
 ### 4a. winget manifest
 - One-liner: submit a manifest to microsoft/winget-pkgs once you have at least one signed (or accepted-unsigned-with-hash) release.
-- Why: winget install tiennm99.ClaudeCodeUsageBubble is the only Windows install command anyone actually wants to run. Free distribution.
+- Why: winget install tiennm99.UsageMonitor is the only Windows install command anyone actually wants to run. Free distribution.
 - Effort: S (one PR to winget-pkgs) once the release artifact has a stable URL + SHA256, which it now does.
 - Mistake if: you submit before code signing. winget accepts unsigned packages but SmartScreen still nags; that user pain accrues to your repo, not winget.
 
@@ -109,7 +109,7 @@ Only worthwhile if you want strangers using it. State the goal explicitly before
 ### Cut from section 4
 - MSIX. Cut. MSIX requires the Store or sideload pain. Cost > benefit for an indie widget.
 - MSI installer. Cut. A 4-MB single exe that drops in LOCALAPPDATA is better than an MSI for this audience.
-- Crash dumps. The app is small and runs in a single Win32 message loop. simplelog to TEMP claude-code-usage-bubble.log already covers 95 percent of post-mortem needs.
+- Crash dumps. The app is small and runs in a single Win32 message loop. simplelog to TEMP usage-monitor.log already covers 95 percent of post-mortem needs.
 
 ---
 
