@@ -44,29 +44,38 @@ impl UsageProvider for ClaudeProvider {
         if token_is_expired(token.expires_at_unix_ms) {
             return Err(Error::AuthRequired);
         }
-        fetch_with_fallback(http, &token.access_token)
+        fetch_with_fallback(http, &token.access_token, USAGE_URL, MESSAGES_URL)
     }
 }
 
-fn fetch_with_fallback(http: &Client, token: &str) -> Result<UsageWindows, Error> {
+fn fetch_with_fallback(
+    http: &Client,
+    token: &str,
+    usage_url: &str,
+    messages_url: &str,
+) -> Result<UsageWindows, Error> {
     // First try the dedicated endpoint.
-    match try_usage_endpoint(http, token)? {
+    match try_usage_endpoint(http, token, usage_url)? {
         Some(windows) if has_reset_times(&windows) => return Ok(windows),
         Some(partial) => {
             // Got percentages but no reset times — fill them in from messages.
-            if let Ok(fallback) = try_messages_endpoint(http, token) {
+            if let Ok(fallback) = try_messages_endpoint(http, token, messages_url) {
                 return Ok(merge_resets(partial, fallback));
             }
             return Ok(partial);
         }
         None => {}
     }
-    try_messages_endpoint(http, token)
+    try_messages_endpoint(http, token, messages_url)
 }
 
-fn try_usage_endpoint(http: &Client, token: &str) -> Result<Option<UsageWindows>, Error> {
+fn try_usage_endpoint(
+    http: &Client,
+    token: &str,
+    url: &str,
+) -> Result<Option<UsageWindows>, Error> {
     let resp = match http
-        .get(USAGE_URL)
+        .get(url)
         .header("Authorization", &format!("Bearer {token}"))
         .header("anthropic-beta", BETA_HEADER)
         .send()
@@ -95,7 +104,7 @@ fn parse_usage_body(body: &[u8]) -> Option<UsageWindows> {
     Some(UsageWindows { primary, secondary })
 }
 
-fn try_messages_endpoint(http: &Client, token: &str) -> Result<UsageWindows, Error> {
+fn try_messages_endpoint(http: &Client, token: &str, url: &str) -> Result<UsageWindows, Error> {
     for model in PROBE_MODELS {
         let body = serde_json::json!({
             "model": model,
@@ -103,7 +112,7 @@ fn try_messages_endpoint(http: &Client, token: &str) -> Result<UsageWindows, Err
             "messages": [{"role": "user", "content": "."}],
         });
         let resp = match http
-            .post(MESSAGES_URL)
+            .post(url)
             .header("Authorization", &format!("Bearer {token}"))
             .header("anthropic-version", API_VERSION)
             .header("anthropic-beta", BETA_HEADER)
@@ -264,6 +273,8 @@ struct Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::test_server::{serve_once, Served};
+    use crate::net::USER_AGENT;
 
     fn at(secs: u64) -> Option<SystemTime> {
         Some(UNIX_EPOCH + Duration::from_secs(secs))
@@ -380,5 +391,136 @@ mod tests {
         assert!(!token_is_expired(None));
         assert!(token_is_expired(Some(0)));
         assert!(!token_is_expired(Some(i64::MAX)));
+    }
+
+    // --- HTTP paths against a loopback server ---
+
+    const RATE_LIMIT_HEADERS: &[(&str, &str)] = &[
+        ("anthropic-ratelimit-unified-5h-utilization", "0.25"),
+        ("anthropic-ratelimit-unified-5h-reset", "1000"),
+        ("anthropic-ratelimit-unified-7d-utilization", "0.5"),
+        ("anthropic-ratelimit-unified-7d-reset", "2000"),
+    ];
+
+    fn client() -> Client {
+        Client::without_proxy(USER_AGENT)
+    }
+
+    fn fetch(usage: &Served, messages: &Served) -> Result<UsageWindows, Error> {
+        fetch_with_fallback(&client(), "tok", &usage.base, &messages.base)
+    }
+
+    fn received(served: &Served) -> String {
+        served
+            .request
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server saw the request")
+    }
+
+    fn assert_not_called(served: &Served) {
+        assert!(
+            served
+                .request
+                .recv_timeout(Duration::from_millis(300))
+                .is_err(),
+            "endpoint must not be called"
+        );
+    }
+
+    fn messages_with_headers() -> Served {
+        serve_once("200 OK", RATE_LIMIT_HEADERS, b"{}".to_vec())
+    }
+
+    #[test]
+    fn usage_auth_failures_stop_before_the_messages_fallback() {
+        for status in ["401 Unauthorized", "403 Forbidden"] {
+            let usage = serve_once(status, &[], b"{}".to_vec());
+            let messages = messages_with_headers();
+            let result = fetch(&usage, &messages);
+            assert!(
+                matches!(result, Err(Error::AuthRequired)),
+                "{status}: {result:?}"
+            );
+            let request = received(&usage);
+            assert!(request.starts_with("GET / HTTP/1.1\r\n"), "{request}");
+            let lower = request.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer tok\r\n"), "{request}");
+            assert!(
+                lower.contains("anthropic-beta: oauth-2025-04-20\r\n"),
+                "{request}"
+            );
+            assert_not_called(&messages);
+        }
+    }
+
+    #[test]
+    fn usage_server_error_falls_back_to_messages_headers() {
+        let usage = serve_once("500 Internal Server Error", &[], b"oops".to_vec());
+        let messages = messages_with_headers();
+        let w = fetch(&usage, &messages).expect("fallback windows");
+        assert_eq!(w.primary.utilization, 25.0);
+        assert_eq!(w.primary.resets_at, at(1000));
+        assert_eq!(w.secondary.utilization, 50.0);
+        assert_eq!(w.secondary.resets_at, at(2000));
+        let request = received(&messages);
+        assert!(request.starts_with("POST / HTTP/1.1\r\n"), "{request}");
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("anthropic-version: 2023-06-01\r\n"));
+        assert!(request.contains("\"max_tokens\":1"), "{request}");
+    }
+
+    #[test]
+    fn unparsable_usage_body_falls_back_to_messages_headers() {
+        let usage = serve_once("200 OK", &[], b"not json".to_vec());
+        let messages = messages_with_headers();
+        let w = fetch(&usage, &messages).expect("fallback windows");
+        assert_eq!(w.primary.utilization, 25.0);
+        assert_eq!(w.secondary.resets_at, at(2000));
+        received(&messages);
+    }
+
+    #[test]
+    fn full_usage_body_skips_the_messages_call() {
+        let usage = serve_once("200 OK", &[], fixture("anthropic-usage-full.json"));
+        let messages = messages_with_headers();
+        let w = fetch(&usage, &messages).expect("usage windows");
+        assert_eq!(w.primary.utilization, 42.5);
+        assert_eq!(w.primary.resets_at, at(1_761_040_800));
+        assert_not_called(&messages);
+    }
+
+    #[test]
+    fn partial_usage_body_merges_reset_times_from_messages() {
+        let usage = serve_once("200 OK", &[], fixture("anthropic-usage-partial.json"));
+        let messages = messages_with_headers();
+        let w = fetch(&usage, &messages).expect("merged windows");
+        assert_eq!(w.primary.utilization, 7.0, "usage percent is kept");
+        assert_eq!(w.primary.resets_at, at(1000), "missing reset is filled in");
+        assert_eq!(w.secondary.utilization, 61.0);
+        assert_eq!(
+            w.secondary.resets_at,
+            at(1_709_251_199),
+            "known reset is kept"
+        );
+        received(&messages);
+    }
+
+    #[test]
+    fn messages_auth_failure_is_auth_required() {
+        let usage = serve_once("503 Service Unavailable", &[], Vec::new());
+        let messages = serve_once("401 Unauthorized", RATE_LIMIT_HEADERS, b"{}".to_vec());
+        let result = fetch(&usage, &messages);
+        assert!(matches!(result, Err(Error::AuthRequired)), "{result:?}");
+    }
+
+    #[test]
+    fn messages_without_rate_limit_headers_is_a_bad_response() {
+        // The second probe model finds the one-shot server gone, which
+        // counts as a failed probe too.
+        let usage = serve_once("500 Internal Server Error", &[], Vec::new());
+        let messages = serve_once("200 OK", &[], b"{}".to_vec());
+        let result = fetch(&usage, &messages);
+        assert!(matches!(result, Err(Error::BadResponse(_))), "{result:?}");
     }
 }
