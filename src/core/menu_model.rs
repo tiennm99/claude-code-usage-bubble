@@ -267,7 +267,7 @@ pub fn build(input: MenuInput<'_>) -> Vec<MenuEntry> {
         hint(&s.control_right_click),
         hint(&s.control_drag),
         hint(&s.control_ctrl_wheel),
-        hint(&s.control_tray_click),
+        hint(s.tray_click_hint()),
     ];
 
     vec![
@@ -453,6 +453,13 @@ mod tests {
         assert!(entries[4..]
             .iter()
             .all(|e| matches!(e, MenuEntry::Hint { .. })));
+        let strings = I18n::load().strings().clone();
+        assert_eq!(
+            entries[8],
+            MenuEntry::Hint {
+                label: strings.tray_click_hint().to_string()
+            }
+        );
     }
 
     /// One line per node, indented by depth: `label [id] kind`.

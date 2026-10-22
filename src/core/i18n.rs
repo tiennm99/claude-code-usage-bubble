@@ -38,6 +38,9 @@ pub struct LocaleStrings {
     pub control_drag: String,
     pub control_ctrl_wheel: String,
     pub control_tray_click: String,
+    /// Linux variant of `control_tray_click`: AppIndicator delivers no tray
+    /// clicks, so every click opens the menu.
+    pub control_tray_click_linux: String,
     pub tray_left_click: String,
     pub check_for_updates: String,
     pub checking_for_updates: String,
@@ -105,6 +108,17 @@ impl LocaleStrings {
         }
     }
 
+    /// Controls hint for the tray icon on the platform this build targets.
+    /// Linux tray icons (AppIndicator) only open the menu, so the
+    /// show/hide click is not offered there.
+    pub fn tray_click_hint(&self) -> &str {
+        if cfg!(target_os = "linux") {
+            &self.control_tray_click_linux
+        } else {
+            &self.control_tray_click
+        }
+    }
+
     /// Display name of a provider.
     pub fn provider_label(&self, provider: ProviderId) -> &str {
         match provider {
@@ -141,6 +155,7 @@ fn english_strings() -> LocaleStrings {
         control_drag: "Drag: move/snap".into(),
         control_ctrl_wheel: "Ctrl+Wheel: resize".into(),
         control_tray_click: "Tray click: show/hide".into(),
+        control_tray_click_linux: "Tray click: menu".into(),
         tray_left_click: "Left-click: show/hide".into(),
         check_for_updates: "Check for updates".into(),
         checking_for_updates: "Checking for updates...".into(),
@@ -286,6 +301,10 @@ mod tests {
             ("control_drag", strings.control_drag.as_str()),
             ("control_ctrl_wheel", strings.control_ctrl_wheel.as_str()),
             ("control_tray_click", strings.control_tray_click.as_str()),
+            (
+                "control_tray_click_linux",
+                strings.control_tray_click_linux.as_str(),
+            ),
             ("tray_left_click", strings.tray_left_click.as_str()),
         ] {
             assert!(!value.trim().is_empty(), "empty string: {name}");
@@ -371,5 +390,16 @@ mod tests {
         };
         assert_eq!(s.autostart_label(), expected);
         assert_eq!(s.provider_label(ProviderId::ChatGpt), "Codex");
+    }
+
+    #[test]
+    fn tray_click_hint_matches_the_platform() {
+        let s = english_strings();
+        let expected = if cfg!(target_os = "linux") {
+            "Tray click: menu"
+        } else {
+            "Tray click: show/hide"
+        };
+        assert_eq!(s.tray_click_hint(), expected);
     }
 }
