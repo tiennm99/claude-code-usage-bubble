@@ -144,8 +144,14 @@ fn reap_detached(mut child: Child) {
     });
 }
 
+/// `cmd.exe` and `powershell.exe` always start, so a wrapped `.cmd` or
+/// `.ps1` would count as spawned even when the script is missing. Skip a
+/// candidate that is not on `PATH` so the next one gets its turn.
 #[cfg(windows)]
 fn command_for(name: &str, args: &[&str]) -> Option<Command> {
+    if !on_path(name, std::env::var_os("PATH").as_deref()) {
+        return None;
+    }
     let lower = name.to_ascii_lowercase();
     let mut cmd = if lower.ends_with(".ps1") {
         let mut c = Command::new("powershell.exe");
@@ -164,6 +170,19 @@ fn command_for(name: &str, args: &[&str]) -> Option<Command> {
     };
     cmd.args(args);
     Some(cmd)
+}
+
+/// Whether `name` is a file in an absolute `PATH` entry. A bare name with
+/// no extension also matches `name.exe`, as `Command` would find it.
+#[cfg(any(windows, test))]
+fn on_path(name: &str, path_var: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path_var) = path_var else {
+        return false;
+    };
+    let bare = std::path::Path::new(name).extension().is_none();
+    std::env::split_paths(path_var)
+        .filter(|dir| dir.is_absolute())
+        .any(|dir| dir.join(name).is_file() || (bare && dir.join(format!("{name}.exe")).is_file()))
 }
 
 #[cfg(unix)]
@@ -376,6 +395,27 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    #[test]
+    fn on_path_finds_only_existing_files_in_absolute_entries() {
+        let dir = temp_dir("on-path");
+        write_file(&dir.join("claude.exe"), 0o644);
+        write_file(&dir.join("codex.cmd"), 0o644);
+        let path_var =
+            std::env::join_paths([dir.clone(), PathBuf::from("relative")]).expect("join paths");
+        let path_var = Some(path_var.as_os_str());
+        assert!(on_path("codex.cmd", path_var));
+        assert!(
+            !on_path("claude.cmd", path_var),
+            "a missing script is skipped"
+        );
+        assert!(on_path("claude", path_var), "a bare name matches its .exe");
+        assert!(!on_path("codex", path_var), "a bare name ignores .cmd");
+        assert!(!on_path("codex.cmd", None));
+        let relative = std::env::join_paths([PathBuf::from("relative")]).expect("join");
+        assert!(!on_path("codex.cmd", Some(relative.as_os_str())));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn write_file(path: &Path, mode: u32) {

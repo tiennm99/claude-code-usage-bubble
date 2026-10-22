@@ -282,23 +282,33 @@ impl Runtime {
     /// Start a poll on a worker thread. While one is running the request is
     /// queued instead, and the worker polls once more when it is done, so a
     /// provider enabled mid-poll still gets its data.
+    ///
+    /// The flags use `SeqCst`: the requester stores `poll_requested` then
+    /// loads `poll_in_flight`, while the worker stores `poll_in_flight` then
+    /// swaps `poll_requested`, so at least one side always sees the other.
     pub fn spawn_poll(self: &Arc<Self>) {
-        if self
+        while self
             .poll_in_flight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
-            self.poll_requested.store(true, Ordering::Release);
-            log::debug!("poll already in flight; queued another");
-            return;
+            self.poll_requested.store(true, Ordering::SeqCst);
+            if self.poll_in_flight.load(Ordering::SeqCst) {
+                log::debug!("poll already in flight; queued another");
+                return;
+            }
+            // The worker finished between the failed claim and the queued
+            // request, so nobody will pick the request up: claim it again.
         }
+        // The poll started here covers any request still queued.
+        self.poll_requested.store(false, Ordering::SeqCst);
         let runtime = Arc::clone(self);
         let spawned = std::thread::Builder::new()
             .name("poll".into())
             .spawn(move || runtime.run_polls());
         if let Err(err) = spawned {
             log::error!("poll thread could not start: {err}");
-            self.poll_in_flight.store(false, Ordering::Release);
+            self.poll_in_flight.store(false, Ordering::SeqCst);
         }
     }
 
@@ -308,14 +318,14 @@ impl Runtime {
         loop {
             self.poll_once();
             self.propagate();
-            if !self.poll_requested.swap(false, Ordering::AcqRel) {
+            if !self.poll_requested.swap(false, Ordering::SeqCst) {
                 break;
             }
         }
-        self.poll_in_flight.store(false, Ordering::Release);
+        self.poll_in_flight.store(false, Ordering::SeqCst);
         // A request that came after the last check but before the flag was
         // cleared was only queued; start it now.
-        if self.poll_requested.swap(false, Ordering::AcqRel) {
+        if self.poll_requested.swap(false, Ordering::SeqCst) {
             self.spawn_poll();
         }
     }

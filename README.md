@@ -250,8 +250,9 @@ What the app sends over the network:
 
 - Requests to Anthropic's Claude endpoints to read your usage
 - Requests to ChatGPT's Codex usage endpoint, if Codex is enabled
-- Requests for `latest.json` from GitHub Releases, at first launch and then
-  hourly by default. Set **Settings** → **Auto-update check** to
+- Requests for `latest.json` from GitHub Releases, hourly by default and at
+  launch when the last check is older than that. A failed check is retried
+  sooner, starting after a minute and backing off up to the interval. Set **Settings** → **Auto-update check** to
   **Disabled** in the right-click menu to stop them; **Check for updates**
   still works when you click it.
 
