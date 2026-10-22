@@ -107,6 +107,38 @@ mod tests {
     }
 
     #[test]
+    fn signature_changes_when_a_rewrite_changes_the_file_size() {
+        use crate::creds::CredentialSource;
+
+        let path = std::env::temp_dir().join(format!(
+            "ccub-local-creds-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let creds = LocalClaudeCreds {
+            id: format!("local:{}", path.display()),
+            path: path.clone(),
+        };
+        assert_eq!(creds.signature(), None, "missing file has no signature");
+
+        std::fs::write(&path, r#"{"claudeAiOauth":{"accessToken":"a"}}"#).expect("write");
+        let before = creds.signature().expect("file exists");
+        assert_eq!(
+            Some(before.clone()),
+            creds.signature(),
+            "stable while unchanged"
+        );
+
+        std::fs::write(&path, r#"{"claudeAiOauth":{"accessToken":"rotated"}}"#).expect("rewrite");
+        let after = creds.signature().expect("file exists");
+        let _ = std::fs::remove_file(&path);
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn missing_fields_are_reported() {
         let err = parse_claude_json(&fixture("claude-credentials-missing-token.json")).unwrap_err();
         assert!(matches!(err, Error::MissingField("accessToken")), "{err}");
