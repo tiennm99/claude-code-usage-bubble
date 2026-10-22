@@ -314,8 +314,10 @@ impl Runtime {
             .into_iter()
             .map(|(provider, result)| (provider, poll_outcome(provider, result)))
             .collect();
-        let applied =
-            self.with_state(|s| s.usage.apply_results(outcomes, &s.strings, Instant::now()));
+        let applied = self.with_state(|s| {
+            s.usage
+                .apply_results(outcomes, &s.strings, Instant::now(), SystemTime::now())
+        });
         self.deliver_alerts(applied.alerts);
         if !applied.auth_failures.is_empty() {
             self.refresh_credentials(&applied.auth_failures);
