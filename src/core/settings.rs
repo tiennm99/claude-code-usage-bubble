@@ -231,10 +231,17 @@ pub fn load() -> Settings {
     load_from(&settings_path())
 }
 
-/// [`load`] from an explicit path.
+/// [`load`] from an explicit path. A file that is not a JSON object at all
+/// is copied to `settings.json.bak` first, since the next save replaces it.
 pub fn load_from(path: &Path) -> Settings {
     match std::fs::read_to_string(path) {
-        Ok(content) => parse_and_normalise(&content),
+        Ok(content) => {
+            let parsed = parse(&content);
+            if parsed.is_none() {
+                back_up_unreadable(path);
+            }
+            normalise(parsed.unwrap_or_default())
+        }
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
                 log::warn!("settings read failed ({}): {err}", path.display());
@@ -244,13 +251,65 @@ pub fn load_from(path: &Path) -> Settings {
     }
 }
 
-/// Parse settings JSON, falling back to the defaults when it is corrupt,
-/// then enforce the invariants a hand-edited file may break.
+/// Keep a copy of a settings file that could not be read at all, so the
+/// user can recover it by hand.
+fn back_up_unreadable(path: &Path) {
+    let backup = path.with_extension("json.bak");
+    match std::fs::copy(path, &backup) {
+        Ok(_) => log::warn!(
+            "settings file is not valid JSON; kept a copy at {}",
+            backup.display()
+        ),
+        Err(err) => log::warn!(
+            "settings file is not valid JSON and could not be copied to {}: {err}",
+            backup.display()
+        ),
+    }
+}
+
+/// Parse settings JSON, keeping every readable key, then enforce the
+/// invariants a hand-edited file may break. A file that is not a JSON
+/// object yields the defaults.
 pub fn parse_and_normalise(content: &str) -> Settings {
-    let mut settings: Settings = serde_json::from_str(content).unwrap_or_else(|err| {
+    normalise(parse(content).unwrap_or_default())
+}
+
+/// Parse settings JSON. A value of the wrong type for one key costs only
+/// that key, which falls back to its default; `None` when the content is
+/// not a JSON object.
+fn parse(content: &str) -> Option<Settings> {
+    let err = match serde_json::from_str::<Settings>(content) {
+        Ok(settings) => return Some(settings),
+        Err(err) => err,
+    };
+    let Ok(serde_json::Value::Object(file)) = serde_json::from_str(content) else {
         log::warn!("settings file is not valid; using defaults: {err}");
-        Settings::default()
-    });
+        return None;
+    };
+    log::warn!("settings file has invalid values; keeping the valid keys: {err}");
+    let serde_json::Value::Object(mut merged) = serde_json::to_value(Settings::default()).ok()?
+    else {
+        return None;
+    };
+    for (key, value) in file {
+        // Unknown keys are ignored, as the strict parse does.
+        if !merged.contains_key(&key) {
+            continue;
+        }
+        let mut trial = merged.clone();
+        trial.insert(key.clone(), value.clone());
+        match serde_json::from_value::<Settings>(serde_json::Value::Object(trial)) {
+            Ok(_) => {
+                merged.insert(key, value);
+            }
+            Err(err) => log::warn!("settings key {key:?} ignored: {err}"),
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(merged)).ok()
+}
+
+/// Enforce the invariants a hand-edited file may break.
+fn normalise(mut settings: Settings) -> Settings {
     // At least one live provider must be visible. Otherwise the app has nothing to show.
     if !settings.has_enabled_live_provider() {
         settings.show_claude_code = true;
@@ -396,6 +455,66 @@ mod tests {
             Some(UPDATE_CHECK_HOURLY_SECS)
         );
         assert!(settings.widget_visible);
+    }
+
+    #[test]
+    fn one_wrongly_typed_key_keeps_the_others() {
+        let settings = parse_and_normalise(
+            r#"{"bubble_size_logical":250.5,"show_codex":true,"poll_interval_ms":60000}"#,
+        );
+        assert_eq!(settings.bubble_size_logical, DEFAULT_BUBBLE_SIZE);
+        assert!(settings.show_codex);
+        assert_eq!(settings.poll_interval_ms, POLL_1_MIN);
+        // Keys missing from the file keep their defaults.
+        assert!(settings.show_claude_code);
+        assert_eq!(
+            settings.update_check_interval_secs,
+            Some(UPDATE_CHECK_HOURLY_SECS)
+        );
+
+        let settings = parse_and_normalise(
+            r#"{"show_codex":"yes","widget_visible":false,"last_update_check_unix":5,
+                "bubble_positions":{"claude":[1,2]},"unknown":1}"#,
+        );
+        assert!(!settings.show_codex);
+        assert!(!settings.widget_visible);
+        assert_eq!(settings.last_update_check_unix, Some(5));
+        assert_eq!(
+            settings.bubble_positions.get(ProviderId::Claude),
+            Some((1, 2))
+        );
+    }
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ccub-settings-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ))
+    }
+
+    #[test]
+    fn an_unreadable_file_is_backed_up_before_it_can_be_replaced() {
+        let dir = temp_dir("backup");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(SETTINGS_FILE);
+        let backup = path.with_extension("json.bak");
+        std::fs::write(&path, "{ not json").expect("write");
+        assert!(load_from(&path).show_claude_code);
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("backup"),
+            "{ not json"
+        );
+
+        // A file with only a bad value is salvaged, not backed up.
+        std::fs::remove_file(&backup).expect("remove backup");
+        std::fs::write(&path, r#"{"show_codex":true,"poll_interval_ms":"x"}"#).expect("write");
+        assert!(load_from(&path).show_codex);
+        assert!(!backup.exists());
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

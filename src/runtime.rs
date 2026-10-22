@@ -166,8 +166,11 @@ pub struct Runtime {
     http: net::Client,
     registry: Mutex<Registry>,
     /// At most one poll runs at a time; a Refresh spam or a timer firing
-    /// during a slow poll is dropped instead of stacking requests.
+    /// during a slow poll is folded into one follow-up poll through
+    /// `poll_requested` instead of stacking requests.
     poll_in_flight: AtomicBool,
+    /// A poll was asked for while one was in flight.
+    poll_requested: AtomicBool,
     /// The release the last check found, applied by the version menu item.
     /// Never locked together with `state`.
     pending_update: Mutex<Option<tauri_plugin_updater::Update>>,
@@ -276,27 +279,44 @@ impl Runtime {
         }
     }
 
-    /// Start a poll on a worker thread unless one is already running.
+    /// Start a poll on a worker thread. While one is running the request is
+    /// queued instead, and the worker polls once more when it is done, so a
+    /// provider enabled mid-poll still gets its data.
     pub fn spawn_poll(self: &Arc<Self>) {
         if self
             .poll_in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            log::debug!("poll already in flight; skipped");
+            self.poll_requested.store(true, Ordering::Release);
+            log::debug!("poll already in flight; queued another");
             return;
         }
         let runtime = Arc::clone(self);
         let spawned = std::thread::Builder::new()
             .name("poll".into())
-            .spawn(move || {
-                runtime.poll_once();
-                runtime.poll_in_flight.store(false, Ordering::Release);
-                runtime.propagate();
-            });
+            .spawn(move || runtime.run_polls());
         if let Err(err) = spawned {
             log::error!("poll thread could not start: {err}");
             self.poll_in_flight.store(false, Ordering::Release);
+        }
+    }
+
+    /// Body of the poll worker: poll until no request is queued, then hand
+    /// the in-flight flag back.
+    fn run_polls(self: &Arc<Self>) {
+        loop {
+            self.poll_once();
+            self.propagate();
+            if !self.poll_requested.swap(false, Ordering::AcqRel) {
+                break;
+            }
+        }
+        self.poll_in_flight.store(false, Ordering::Release);
+        // A request that came after the last check but before the flag was
+        // cleared was only queued; start it now.
+        if self.poll_requested.swap(false, Ordering::AcqRel) {
+            self.spawn_poll();
         }
     }
 
@@ -314,8 +334,10 @@ impl Runtime {
             .into_iter()
             .map(|(provider, result)| (provider, poll_outcome(provider, result)))
             .collect();
-        let applied =
-            self.with_state(|s| s.usage.apply_results(outcomes, &s.strings, Instant::now()));
+        let applied = self.with_state(|s| {
+            s.usage
+                .apply_results(outcomes, &s.strings, Instant::now(), SystemTime::now())
+        });
         self.deliver_alerts(applied.alerts);
         if !applied.auth_failures.is_empty() {
             self.refresh_credentials(&applied.auth_failures);
@@ -578,7 +600,12 @@ impl Runtime {
                 // The apply may fail and keep this process running, so the
                 // automatic check must stay armed.
                 log::debug!("update check skipped while an update is applied");
-                self.send(Message::UpdateCheckDone { interval_secs });
+                // Not a failure: re-arm the full interval, as the apply
+                // either relaunches or reports its own error.
+                self.send(Message::UpdateCheckDone {
+                    interval_secs,
+                    succeeded: true,
+                });
                 return;
             }
             _ => {}
@@ -591,19 +618,21 @@ impl Runtime {
         if let Err(err) = spawned {
             log::error!("update check thread could not start: {err}");
             self.with_state(|s| s.update_status = UpdateStatus::Failed);
-            self.send(Message::UpdateCheckDone { interval_secs });
+            self.send(Message::UpdateCheckDone {
+                interval_secs,
+                succeeded: false,
+            });
             self.refresh_shell(false);
         }
     }
 
-    /// Blocking body of [`Self::check_for_updates`].
+    /// Blocking body of [`Self::check_for_updates`]. Only a check that got
+    /// an answer is stamped as the last check; a failed one leaves the
+    /// stamp alone and has the scheduler retry sooner.
     fn run_update_check(&self) {
         let proxy = update::proxy_url(net::env_proxy().as_ref(), self.http.system_proxy());
         let outcome = update::check(&self.ui.app, proxy);
-        let now_unix = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or_default();
+        let succeeded = outcome.is_ok();
         let (status, found) = match outcome {
             Ok(CheckOutcome::UpToDate) => {
                 log::info!("update check: up to date");
@@ -626,13 +655,21 @@ impl Runtime {
             .unwrap_or_else(PoisonError::into_inner) = found;
         let (snapshot, interval_secs) = self.with_state(|s| {
             s.update_status = status;
-            s.settings.last_update_check_unix = Some(now_unix);
-            (s.settings.clone(), s.settings.update_check_interval_secs)
+            let snapshot = succeeded.then(|| {
+                s.settings.last_update_check_unix = Some(scheduler::unix_now());
+                s.settings.clone()
+            });
+            (snapshot, s.settings.update_check_interval_secs)
         });
-        if let Err(err) = settings::save(&snapshot) {
-            log::warn!("settings save failed: {err}");
+        if let Some(snapshot) = snapshot {
+            if let Err(err) = settings::save(&snapshot) {
+                log::warn!("settings save failed: {err}");
+            }
         }
-        self.send(Message::UpdateCheckDone { interval_secs });
+        self.send(Message::UpdateCheckDone {
+            interval_secs,
+            succeeded,
+        });
         self.refresh_shell(false);
     }
 
@@ -972,6 +1009,7 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
         http,
         registry: Mutex::new(Registry::with_defaults()),
         poll_in_flight: AtomicBool::new(false),
+        poll_requested: AtomicBool::new(false),
         pending_update: Mutex::new(None),
         scheduler: tx,
         trays: Trays::default(),

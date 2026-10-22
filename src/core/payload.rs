@@ -196,6 +196,7 @@ mod tests {
             vec![(ProviderId::Claude, PollOutcome::Ok(windows))],
             &strings(),
             Instant::now(),
+            SystemTime::now(),
         );
         state
     }
@@ -251,6 +252,7 @@ mod tests {
             vec![(ProviderId::Claude, PollOutcome::AuthFailed)],
             &strings(),
             Instant::now(),
+            SystemTime::now(),
         );
         let snap = state.snapshots.get(&ProviderId::Claude);
         let p = bubble_payload(ProviderId::Claude, snap, &strings(), false, CANVAS, now());
@@ -269,6 +271,7 @@ mod tests {
             vec![(ProviderId::Claude, PollOutcome::Failed)],
             &strings(),
             Instant::now(),
+            SystemTime::now(),
         );
         let snap = state.snapshots.get(&ProviderId::Claude);
         let panel = panel_payload(ProviderId::Claude, snap, &strings(), false);

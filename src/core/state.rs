@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::core::i18n::{self, LocaleStrings};
-use crate::usage::{ProviderId, UsageWindows};
+use crate::usage::{ProviderId, UsageWindows, Window};
 
 /// Minimum gap between two cooldown-gated alerts (threshold and session
 /// expired), so notifications stay calm.
@@ -17,6 +17,10 @@ pub const ALERT_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
 /// Usage thresholds that raise an alert the poll they are crossed.
 pub const ALERT_THRESHOLDS: [u8; 2] = [80, 95];
+
+/// How far a provider's reported reset time may wander between polls of
+/// the same window.
+const RESET_JITTER: Duration = Duration::from_secs(60);
 
 /// Shortest countdown re-render delay.
 const MIN_COUNTDOWN_DELAY: Duration = Duration::from_secs(1);
@@ -111,12 +115,15 @@ pub struct UsageState {
 impl UsageState {
     /// Apply one poll's results. A provider fires an alert only the poll its
     /// session usage crosses 80 or 95, and each alert must pass the
-    /// cooldown. An empty batch changes nothing.
+    /// cooldown. Usage in a session window that replaced the stored one
+    /// counts as climbing from zero. An empty batch changes nothing.
+    /// `now` drives the cooldown, `wall_now` the window-reset check.
     pub fn apply_results(
         &mut self,
         results: Vec<(ProviderId, PollOutcome)>,
         strings: &LocaleStrings,
         now: Instant,
+        wall_now: SystemTime,
     ) -> Applied {
         let mut applied = Applied::default();
         if results.is_empty() {
@@ -128,7 +135,12 @@ impl UsageState {
             let entry = self.snapshots.entry(id).or_default();
             match outcome {
                 PollOutcome::Ok(windows) => {
-                    let old_pct = entry.windows.primary.utilization;
+                    let old_pct =
+                        if is_new_window(&entry.windows.primary, &windows.primary, wall_now) {
+                            0.0
+                        } else {
+                            entry.windows.primary.utilization
+                        };
                     let new_pct = windows.primary.utilization;
                     for threshold in ALERT_THRESHOLDS {
                         if old_pct < threshold as f64 && new_pct >= threshold as f64 {
@@ -199,6 +211,26 @@ impl UsageState {
             .filter_map(|reset| i18n::time_until_display_change_at(reset, now))
             .min()
             .map(|d| d.max(MIN_COUNTDOWN_DELAY))
+    }
+}
+
+/// Whether `new` is a later window than the stored `old` one: the stored
+/// window's reset time has passed, or the reset time moved forward by more
+/// than [`RESET_JITTER`]. A reset time within the jitter of the stored one
+/// is the same window, even when that time has passed, since the provider
+/// still reports it.
+fn is_new_window(old: &Window, new: &Window, wall_now: SystemTime) -> bool {
+    let Some(old_reset) = old.resets_at else {
+        return false;
+    };
+    let near = |t: SystemTime| {
+        let gap = t.duration_since(old_reset).unwrap_or_else(|e| e.duration());
+        gap <= RESET_JITTER
+    };
+    match new.resets_at {
+        Some(new_reset) if near(new_reset) => false,
+        Some(new_reset) => old_reset <= wall_now || new_reset > old_reset,
+        None => old_reset <= wall_now,
     }
 }
 
@@ -304,12 +336,129 @@ mod tests {
     }
 
     fn poll(state: &mut UsageState, pct: f64, now: Instant) -> Applied {
+        poll_window(state, windows(pct), now, SystemTime::now())
+    }
+
+    fn poll_window(
+        state: &mut UsageState,
+        w: UsageWindows,
+        now: Instant,
+        wall_now: SystemTime,
+    ) -> Applied {
         let strings = I18n::load().strings().clone();
         state.apply_results(
-            vec![(ProviderId::Claude, PollOutcome::Ok(windows(pct)))],
+            vec![(ProviderId::Claude, PollOutcome::Ok(w))],
             &strings,
             now,
+            wall_now,
         )
+    }
+
+    /// A session window at `pct` that resets at `resets_at`.
+    fn session(pct: f64, resets_at: SystemTime) -> UsageWindows {
+        let mut w = windows(pct);
+        w.primary.resets_at = Some(resets_at);
+        w
+    }
+
+    const FIVE_HOURS: Duration = Duration::from_secs(5 * 3_600);
+
+    #[test]
+    fn a_reset_window_alerts_again_on_its_own_crossing() {
+        let t0 = Instant::now();
+        let wall0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset1 = wall0 + Duration::from_secs(3_600);
+        let mut state = UsageState::default();
+        assert_eq!(
+            poll_window(&mut state, session(97.0, reset1), t0, wall0).alerts,
+            [threshold(80)]
+        );
+        // After the reset the new window climbs to 85 and crosses 80 again.
+        let t1 = t0 + 2 * ALERT_COOLDOWN;
+        let wall1 = reset1 + Duration::from_secs(600);
+        assert_eq!(
+            poll_window(&mut state, session(85.0, reset1 + FIVE_HOURS), t1, wall1).alerts,
+            [threshold(80)]
+        );
+    }
+
+    #[test]
+    fn a_reset_detected_by_a_later_reset_time_counts_too() {
+        // The poll clock lags, but the provider already reports the next
+        // window: its reset time moved forward by a whole window.
+        let t0 = Instant::now();
+        let wall0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset1 = wall0 + Duration::from_secs(60);
+        let mut state = UsageState::default();
+        poll_window(&mut state, session(97.0, reset1), t0, wall0);
+        let t1 = t0 + 2 * ALERT_COOLDOWN;
+        assert_eq!(
+            poll_window(&mut state, session(85.0, reset1 + FIVE_HOURS), t1, wall0).alerts,
+            [threshold(80)]
+        );
+    }
+
+    #[test]
+    fn a_new_window_crosses_both_thresholds_in_order() {
+        let t0 = Instant::now();
+        let wall0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset1 = wall0 + Duration::from_secs(3_600);
+        let reset2 = reset1 + FIVE_HOURS;
+        let mut state = UsageState::default();
+        poll_window(&mut state, session(97.0, reset1), t0, wall0);
+        // Jumping to 96 crosses 80 and 95; the cooldown keeps the first.
+        let t1 = t0 + 2 * ALERT_COOLDOWN;
+        let wall1 = reset1 + Duration::from_secs(60);
+        assert_eq!(
+            poll_window(&mut state, session(96.0, reset2), t1, wall1).alerts,
+            [threshold(80)]
+        );
+        // Climbing in two steps alerts at 80, then at 95 after the cooldown.
+        let mut state = UsageState::default();
+        poll_window(&mut state, session(97.0, reset1), t0, wall0);
+        assert_eq!(
+            poll_window(&mut state, session(85.0, reset2), t1, wall1).alerts,
+            [threshold(80)]
+        );
+        let t2 = t1 + ALERT_COOLDOWN;
+        assert_eq!(
+            poll_window(&mut state, session(96.0, reset2), t2, wall1).alerts,
+            [threshold(95)]
+        );
+    }
+
+    #[test]
+    fn reset_time_jitter_within_a_window_does_not_realert() {
+        let t0 = Instant::now();
+        let wall0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let reset = wall0 + Duration::from_secs(3_600);
+        let mut state = UsageState::default();
+        assert_eq!(
+            poll_window(&mut state, session(85.0, reset), t0, wall0).alerts,
+            [threshold(80)]
+        );
+        let later = t0 + 2 * ALERT_COOLDOWN;
+        let jitter = Duration::from_secs(3);
+        for (i, reported) in [reset + jitter, reset - jitter, reset]
+            .into_iter()
+            .enumerate()
+        {
+            let t = later + ALERT_COOLDOWN * u32::try_from(i).expect("small");
+            assert!(poll_window(&mut state, session(88.0, reported), t, wall0)
+                .alerts
+                .is_empty());
+        }
+        // A poll just past the reset that still reports the same window is
+        // the same window, not a fresh one at 88%.
+        let past = reset + Duration::from_secs(5);
+        assert!(poll_window(
+            &mut state,
+            session(88.0, reset),
+            later + 4 * ALERT_COOLDOWN,
+            past
+        )
+        .alerts
+        .is_empty());
     }
 
     fn threshold(t: u8) -> Alert {
@@ -374,6 +523,7 @@ mod tests {
             ],
             &strings,
             Instant::now(),
+            SystemTime::now(),
         );
         assert_eq!(applied.auth_failures, [ProviderId::Claude]);
         assert!(!state.last_poll_ok);
@@ -398,12 +548,13 @@ mod tests {
             ],
             &strings,
             Instant::now(),
+            SystemTime::now(),
         );
         assert!(state.last_poll_ok);
         assert!(applied.auth_failures.is_empty());
         assert_eq!(state.snapshots[&ProviderId::ChatGpt].primary_text, "5%");
         assert_eq!(
-            state.apply_results(Vec::new(), &strings, Instant::now()),
+            state.apply_results(Vec::new(), &strings, Instant::now(), SystemTime::now()),
             Applied::default()
         );
         assert!(state.last_poll_ok);
