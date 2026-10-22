@@ -324,6 +324,9 @@ fn snap_alongside_taskbar(
     gap: i32,
 ) {
     let Fit { wa, w, h, zone } = *fit;
+    if !taskbar_borders_work_area(edge, tb, wa) {
+        return;
+    }
     // Only snap on the taskbar's docked edge. The bubble docks against the
     // inner face of the taskbar with a 4-px gap so it visually leans on it.
     match edge {
@@ -354,6 +357,21 @@ fn snap_alongside_taskbar(
     }
 }
 
+/// Whether the taskbar sits on this work area's `edge`: its inner face is
+/// that work-area edge and it overlaps the work area along that edge. A
+/// taskbar on another monitor (the platform reports only the primary's)
+/// fails this, so it never pulls a bubble dropped on a secondary monitor.
+fn taskbar_borders_work_area(edge: Edge, tb: &Rect, wa: &Rect) -> bool {
+    let overlaps_x = tb.l < wa.r && tb.r > wa.l;
+    let overlaps_y = tb.t < wa.b && tb.b > wa.t;
+    match edge {
+        Edge::Bottom => tb.t == wa.b && overlaps_x,
+        Edge::Top => tb.b == wa.t && overlaps_x,
+        Edge::Left => tb.r == wa.l && overlaps_y,
+        Edge::Right => tb.l == wa.r && overlaps_y,
+    }
+}
+
 fn align_with_peer(peers: &[Rect], ny: &mut i32, tolerance: i32) {
     if let Some(peer) = peers.iter().find(|p| (*ny - p.t).abs() <= tolerance) {
         *ny = peer.t;
@@ -362,7 +380,7 @@ fn align_with_peer(peers: &[Rect], ny: &mut i32, tolerance: i32) {
 
 /// Place a `panel_w`×`panel_h` panel below `anchor` (the bubble's outer
 /// rect), flipping above when it would clip, and keep it inside `bounds`
-/// (the virtual-screen union of all monitors, whose origin can be negative).
+/// (the work area of the bubble's monitor, whose origin can be negative).
 pub fn place_near(anchor: Rect, panel_size: (i32, i32), bounds: Rect) -> Point {
     let (panel_w, panel_h) = panel_size;
     let mut x = anchor.l;
@@ -663,6 +681,29 @@ mod tests {
     }
 
     #[test]
+    fn taskbar_of_another_monitor_never_snaps() {
+        // The platform reports the primary's bottom taskbar; the bubble is
+        // dropped on a secondary monitor right of the primary, 10 px above
+        // where that taskbar's snap would put it and far from its own edges.
+        let primary_taskbar = Rect::new(0, 1040, 1920, 1080);
+        let rect = Rect::from_xywh(2800, 1040 - 4 - 66 - 10, 200, 66);
+        for secondary_wa in [
+            Rect::new(1920, 0, 3840, 1080),
+            // Same bottom as the primary's work area, still no overlap.
+            Rect::new(1920, 0, 3840, 1040),
+        ] {
+            let i = SnapInput {
+                rect,
+                work_area: secondary_wa,
+                dpi: 96,
+                taskbar: Some((Edge::Bottom, primary_taskbar)),
+                peers: Vec::new(),
+            };
+            assert_eq!(snap(&i), Point::new(rect.l, rect.t), "{secondary_wa:?}");
+        }
+    }
+
+    #[test]
     fn peer_alignment_takes_first_peer_within_tolerance() {
         let mut i = input(Rect::from_xywh(800, 500, 200, 66));
         i.peers = vec![
@@ -739,6 +780,42 @@ mod tests {
         let tall_bounds = Rect::new(-1920, -200, 1920, 100);
         let b = Rect::from_xywh(0, -190, 200, 66);
         assert_eq!(place_near(b, (280, 400), tall_bounds), Point::new(0, -190));
+    }
+
+    #[test]
+    fn place_near_flips_above_on_the_shorter_monitor_of_a_mixed_layout() {
+        // A 1920x1080 laptop (40 px taskbar) left of a top-aligned
+        // 2560x1440 monitor. Near the laptop's bottom the panel flips above
+        // within the laptop's work area, though the union of both monitors
+        // would leave room below.
+        let laptop_work = Rect::new(0, 0, 1920, 1040);
+        let bubble = Rect::from_xywh(1500, 940, 200, 66);
+        assert_eq!(
+            place_near(bubble, (280, 120), laptop_work),
+            Point::new(1500, 940 - 120 - 8)
+        );
+        let union = Rect::new(0, 0, 4480, 1440);
+        assert_eq!(
+            place_near(bubble, (280, 120), union),
+            Point::new(1500, 940 + 66 + 8)
+        );
+    }
+
+    #[test]
+    fn place_near_flips_against_the_work_area_not_the_monitor() {
+        // The panel fits below inside the 1080-tall monitor but not inside
+        // its work area, which ends at the taskbar's top at 1040.
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let work = Rect::new(0, 0, 1920, 1040);
+        let bubble = Rect::from_xywh(100, 880, 200, 66);
+        assert_eq!(
+            place_near(bubble, (280, 120), monitor),
+            Point::new(100, 954)
+        );
+        assert_eq!(
+            place_near(bubble, (280, 120), work),
+            Point::new(100, 880 - 120 - 8)
+        );
     }
 
     #[test]

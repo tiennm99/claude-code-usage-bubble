@@ -515,7 +515,9 @@ impl Runtime {
     }
 
     /// Clamp and store the bubble size, then resize every bubble around its
-    /// centre (no snap, no position save); a no-op when it does not change.
+    /// centre, kept inside its work area (no snap); a no-op when it does not
+    /// change. A bubble with a saved position has it updated to where the
+    /// resize put it; one still at its default spot stays unsaved.
     pub fn set_bubble_size(self: &Arc<Self>, size_logical: i32) {
         let size = size_logical.clamp(MIN_BUBBLE_SIZE, MAX_BUBBLE_SIZE);
         let changed = self.with_state(|s| s.settings.bubble_size_logical != size);
@@ -523,7 +525,12 @@ impl Runtime {
             return;
         }
         self.update_settings(|s| s.bubble_size_logical = size);
-        bubble::resize_all(&self.ui.app, size);
+        for (provider, pos) in bubble::resize_all(&self.ui.app, size) {
+            let saved = self.with_state(|s| s.settings.bubble_positions.get(provider).is_some());
+            if saved {
+                self.save_bubble_position(provider, (pos.x, pos.y));
+            }
+        }
         self.propagate();
     }
 
@@ -985,6 +992,10 @@ fn setup(app: &mut tauri::App, cli: &CliArgs) -> Result<(), Box<dyn Error>> {
     // The thread is detached; it stops on `Message::Shutdown` at exit.
     scheduler::spawn(config, rx, Arc::clone(&runtime))?;
     runtime.send(Message::PollNow);
+
+    // tao's theme change never reaches a window on Linux; follow the portal.
+    #[cfg(target_os = "linux")]
+    platform::linux_theme::spawn(app.handle());
 
     // Without the thread the bubbles just stay up over fullscreen apps.
     if let Err(err) = fullscreen::spawn(Arc::clone(&runtime)) {
