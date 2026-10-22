@@ -101,6 +101,7 @@ body {
 }
 
 .tail-pct {
+  /* The layout reserves this column measured at TAIL_PCT_WEIGHT in layout.js; change both together. */
   font-weight: 600;
 }
 

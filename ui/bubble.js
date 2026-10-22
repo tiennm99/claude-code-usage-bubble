@@ -15,6 +15,8 @@ import {
   tailLayout,
   timeFillWidth,
   usageFillWidth,
+  WHEEL_IDLE,
+  wheelSteps,
 } from './layout.js';
 import {
   forwardErrors,
@@ -53,7 +55,7 @@ const DRAG_THRESHOLD_PX = 3;
 const PULSE_INTERVAL_MS = 80;
 const TIME_PROGRESS_INTERVAL_MS = 60_000;
 const FONT_STACK = '"Segoe UI", system-ui, sans-serif';
-/** Weight the layout's reserved text widths are measured at. */
+/** Weight text is measured at when the caller names none (regular). */
 const MEASURE_WEIGHT = 400;
 const HEAD_LABEL_WEIGHT = 600;
 
@@ -212,7 +214,7 @@ function relayout(p) {
   }
   const canvas = { canvasW: p.canvasW, canvasH: p.canvasH, dpi: p.dpi };
   head = headMetrics(canvas);
-  tail = tailLayout(canvas, (text, px) => measure(text, px));
+  tail = tailLayout(canvas, (text, px, weight) => measure(text, px, weight));
   layoutKey = key;
 
   rings.setAttribute('viewBox', `0 0 ${p.canvasW} ${p.canvasH}`);
@@ -447,6 +449,9 @@ window.addEventListener('contextmenu', (event) => {
   invoke('show_context_menu', { label: windowLabel }).catch(logFailure('show_context_menu'));
 });
 
+/** Ctrl+wheel gesture carried between wheel events. */
+let wheelState = WHEEL_IDLE;
+
 window.addEventListener(
   'wheel',
   (event) => {
@@ -455,11 +460,15 @@ window.addEventListener(
     }
     // Ctrl+wheel would otherwise zoom the page.
     event.preventDefault();
-    const dir = Math.sign(-event.deltaY);
-    if (event.target !== pill || dir === 0) {
+    if (event.target !== pill) {
       return;
     }
-    invoke('bubble_resize_step', { dir }).catch(logFailure('bubble_resize_step'));
+    const result = wheelSteps(wheelState, event.deltaY, event.deltaMode, event.timeStamp);
+    wheelState = result.state;
+    const dir = Math.sign(result.steps);
+    for (let i = Math.abs(result.steps); i > 0; i -= 1) {
+      invoke('bubble_resize_step', { dir }).catch(logFailure('bubble_resize_step'));
+    }
   },
   { passive: false },
 );
