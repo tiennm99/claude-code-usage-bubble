@@ -35,35 +35,50 @@ impl UsageProvider for ChatGptProvider {
     fn poll(&mut self, http: &Client) -> Result<UsageWindows, Error> {
         let source = self.locator.first_available().ok_or(Error::NoCredentials)?;
         let token = source.read()?;
-        let mut req = http
-            .get(USAGE_URL)
-            .header("Authorization", &format!("Bearer {}", token.access_token))
-            .header("User-Agent", "codex-cli");
-        if let Some(account_id) = token.account_id.as_deref().filter(|s| !s.is_empty()) {
-            req = req.header("ChatGPT-Account-Id", account_id);
-        }
-        let resp = match req.send() {
-            Ok(r) => r,
-            Err(crate::net::Error::Status(code)) if code == 401 || code == 403 => {
-                return Err(Error::AuthRequired);
-            }
-            Err(e) => return Err(Error::Network(e)),
-        };
-        if resp.status() == 401 || resp.status() == 403 {
+        fetch(
+            http,
+            USAGE_URL,
+            &token.access_token,
+            token.account_id.as_deref(),
+        )
+    }
+}
+
+/// Usage windows from the Codex usage endpoint at `url`. The account header
+/// is sent only when `account_id` is set and not empty.
+fn fetch(
+    http: &Client,
+    url: &str,
+    token: &str,
+    account_id: Option<&str>,
+) -> Result<UsageWindows, Error> {
+    let mut req = http
+        .get(url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("User-Agent", "codex-cli");
+    if let Some(account_id) = account_id.filter(|s| !s.is_empty()) {
+        req = req.header("ChatGPT-Account-Id", account_id);
+    }
+    let resp = match req.send() {
+        Ok(r) => r,
+        Err(crate::net::Error::Status(code)) if code == 401 || code == 403 => {
             return Err(Error::AuthRequired);
         }
-        if !(200..300).contains(&resp.status()) {
-            return Err(Error::BadResponse(format!(
-                "Codex usage endpoint returned {}",
-                resp.status()
-            )));
-        }
-        let body: Envelope = resp
-            .json()
-            .map_err(|e| Error::BadResponse(format!("JSON parse: {e}")))?;
-        envelope_to_windows(body)
-            .ok_or_else(|| Error::BadResponse("missing rate_limit section".into()))
+        Err(e) => return Err(Error::Network(e)),
+    };
+    if resp.status() == 401 || resp.status() == 403 {
+        return Err(Error::AuthRequired);
     }
+    if !(200..300).contains(&resp.status()) {
+        return Err(Error::BadResponse(format!(
+            "Codex usage endpoint returned {}",
+            resp.status()
+        )));
+    }
+    let body: Envelope = resp
+        .json()
+        .map_err(|e| Error::BadResponse(format!("JSON parse: {e}")))?;
+    envelope_to_windows(body).ok_or_else(|| Error::BadResponse("missing rate_limit section".into()))
 }
 
 fn envelope_to_windows(envelope: Envelope) -> Option<UsageWindows> {
@@ -129,6 +144,8 @@ impl<T> FlattenBoxed<T> for Option<Option<Box<T>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::test_server::{serve_once, Served};
+    use crate::net::USER_AGENT;
 
     fn at(secs: u64) -> Option<SystemTime> {
         Some(UNIX_EPOCH + Duration::from_secs(secs))
@@ -172,5 +189,79 @@ mod tests {
         assert_eq!(w.primary.utilization, 0.0);
         assert_eq!(w.primary.resets_at, None);
         assert_eq!(w.secondary.resets_at, at(0));
+    }
+
+    // --- HTTP path against a loopback server ---
+
+    fn fixture(name: &str) -> Vec<u8> {
+        let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    }
+
+    fn fetch_from(served: &Served, account_id: Option<&str>) -> Result<UsageWindows, Error> {
+        fetch(
+            &Client::without_proxy(USER_AGENT),
+            &served.base,
+            "tok",
+            account_id,
+        )
+    }
+
+    fn received(served: &Served) -> String {
+        served
+            .request
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server saw the request")
+            .to_ascii_lowercase()
+    }
+
+    #[test]
+    fn success_maps_windows_and_sends_codex_headers() {
+        let served = serve_once("200 OK", &[], fixture("chatgpt-usage-full.json"));
+        let w = fetch_from(&served, None).expect("windows");
+        assert_eq!(w.primary.utilization, 12.0);
+        assert_eq!(w.secondary.resets_at, at(1_761_508_800));
+        let request = received(&served);
+        assert!(
+            request.contains("authorization: bearer tok\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("user-agent: codex-cli\r\n"), "{request}");
+    }
+
+    #[test]
+    fn unauthorized_is_auth_required() {
+        let served = serve_once("401 Unauthorized", &[], b"{}".to_vec());
+        let result = fetch_from(&served, None);
+        assert!(matches!(result, Err(Error::AuthRequired)), "{result:?}");
+    }
+
+    #[test]
+    fn server_error_is_a_bad_response() {
+        let served = serve_once("500 Internal Server Error", &[], b"{}".to_vec());
+        let result = fetch_from(&served, None);
+        assert!(matches!(result, Err(Error::BadResponse(_))), "{result:?}");
+    }
+
+    #[test]
+    fn account_header_is_sent_only_with_an_account_id() {
+        let body = || fixture("chatgpt-usage-full.json");
+        let with_id = serve_once("200 OK", &[], body());
+        fetch_from(&with_id, Some("acct-123")).expect("windows");
+        let request = received(&with_id);
+        assert!(
+            request.contains("chatgpt-account-id: acct-123\r\n"),
+            "{request}"
+        );
+
+        for account_id in [None, Some("")] {
+            let served = serve_once("200 OK", &[], body());
+            fetch_from(&served, account_id).expect("windows");
+            let request = received(&served);
+            assert!(
+                !request.contains("chatgpt-account-id"),
+                "{account_id:?}: {request}"
+            );
+        }
     }
 }
