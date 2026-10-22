@@ -207,7 +207,7 @@ This writes a log file, truncated on each start, to:
 | OS | Log file |
 |----|----------|
 | Windows | `%TEMP%\usage-monitor.log` |
-| Linux | `$TMPDIR/usage-monitor.log`, usually `/tmp/usage-monitor.log` |
+| Linux | `$XDG_STATE_HOME/usage-monitor/usage-monitor.log`, usually `~/.local/state/usage-monitor/usage-monitor.log` (readable by your user only) |
 
 Settings are saved to:
 
