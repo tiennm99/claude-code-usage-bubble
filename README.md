@@ -37,7 +37,7 @@ self-updater are all written from scratch against the same public APIs
 - Left-click the bubble for an expanded panel with both **5h** and **7d**
   bars plus reset countdowns
 - Right-click for refresh, displayed providers, update frequency, startup,
-  updates, exit
+  **Reset position**, updates, **Show widget**, **Restart** and **Exit**
 - A system tray icon per enabled provider, with a usage badge
 - Desktop notifications when usage crosses a threshold, when a sign-in
   expires and after an update was applied
@@ -55,7 +55,11 @@ right-click **Providers** menu.
 
 - Windows 10 or Windows 11, or Linux x86_64 (see below)
 - Claude Code (CLI or App) installed and authenticated
-- Optional: Codex CLI installed and authenticated, if you want Codex usage
+- The `claude` CLI, for automatic token refresh. The app looks for it on
+  `PATH`, and on Linux also in `~/.local/bin` and `~/.claude/local`. Without
+  it an expired sign-in is not refreshed and you have to sign in again.
+- Optional: Codex CLI installed and authenticated, if you want Codex usage.
+  Its token is refreshed through the `codex` CLI, found the same way.
 
 ### Windows
 
@@ -158,9 +162,11 @@ primary monitor on first launch. Drag it where you want it, release to snap
 to the nearest edge if you let go close to one.
 
 - **Left-click** the bubble to open the expanded panel (5h + 7d + countdowns)
-- **Right-click** for refresh, providers, refresh frequency, "Start with
-  Windows" ("Start at login" on Linux), controls, auto-update check
-  (Disabled / Hourly / Daily / Weekly), manual "Check for updates", exit
+- **Right-click** for **Refresh**, **Update frequency**, **Providers**,
+  **Settings**, **Controls**, **Show widget**, **Restart** and **Exit**.
+  **Settings** holds "Start with Windows" ("Start at login" on Linux),
+  **Reset position**, a manual **Check for updates** and the
+  **Auto-update check** interval (Disabled / Hourly / Daily / Weekly)
 - **Drag** anywhere — it floats on top of all other windows
 - **Ctrl + MouseWheel** on the bubble, or **Controls** in the right-click
   menu, to resize it
@@ -241,13 +247,28 @@ What the app sends over the network:
 
 - Requests to Anthropic's Claude endpoints to read your usage
 - Requests to ChatGPT's Codex usage endpoint, if Codex is enabled
-- Requests to GitHub only if you use the app's update-check feature
+- Requests for `latest.json` from GitHub Releases, at first launch and then
+  hourly by default. Set **Settings** → **Auto-update check** to
+  **Disabled** in the right-click menu to stop them; **Check for updates**
+  still works when you click it.
+
+What the app runs:
+
+- When a usage request is rejected because the sign-in has expired, the app
+  runs `claude -p .` for Claude Code and `codex exec .` for Codex, for each
+  provider that was rejected. They run hidden in the background, so the CLI
+  refreshes its token. Each run sends one tiny prompt, which counts toward
+  your usage. The runs use the system temporary directory as their working
+  directory, and Codex runs with `--skip-git-repo-check` and a read-only
+  sandbox.
 
 What the app stores locally:
 
 - Bubble position(s) per model
 - Bubble size
+- Whether the bubbles are shown (**Show widget**)
 - Polling frequency
+- Auto-update check interval
 - Last update check time
 - Displayed provider preferences
 
