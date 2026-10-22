@@ -3,10 +3,9 @@
 Steps left before the Tauri v2 port on `feat/tauri-port` can ship. Do them in
 order.
 
-1. **Finish the updater signing key.** The key pair exists, its public key is
-   in `tauri.conf.json`, and the `TAURI_SIGNING_PRIVATE_KEY` secret is set.
-   Still to do: add the `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secret, and keep
-   an offline backup of `usage-monitor.key` and its password. Losing either
+1. **Back up the updater signing key off this server.** The key pair is in
+   `<workspace>/.backup/usage-monitor/` and both signing secrets are set. Copy
+   `usage-monitor.key` and its password somewhere offline: losing either
    leaves installed copies unable to update.
 2. **Test on Windows 10 and 11.** Download the exe artifact from the latest CI
    run on `feat/tauri-port` and work through the checklist in
