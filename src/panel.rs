@@ -19,6 +19,7 @@ use tauri::{
     WebviewWindowBuilder, Window, WindowEvent,
 };
 
+use crate::bubble;
 use crate::core::geom::{self, Point, Rect};
 use crate::core::payload::PanelPayload;
 use crate::platform;
@@ -245,7 +246,8 @@ fn show_for(app: &AppHandle, window: &WebviewWindow, provider: ProviderId) {
 }
 
 /// Size the panel for the bubble's DPI and place it next to the bubble,
-/// inside the union of all monitors. Without a bubble it stays where it is.
+/// inside the work area of the bubble's monitor. Without a bubble it stays
+/// where it is.
 fn place_near_bubble(app: &AppHandle, window: &WebviewWindow, provider: ProviderId) {
     let Some(bubble) = app.get_webview_window(&runtime::bubble_label(provider)) else {
         log::warn!("no bubble for {}; panel not moved", provider.slug());
@@ -283,7 +285,12 @@ fn place_near_bubble(app: &AppHandle, window: &WebviewWindow, provider: Provider
         i32::try_from(size.width).unwrap_or(i32::MAX),
         i32::try_from(size.height).unwrap_or(i32::MAX),
     );
-    let bounds = virtual_screen(&runtime::monitor_rects(app)).unwrap_or(anchor);
+    // The bubble's own work area keeps the panel off the taskbar and off
+    // the gaps of a mixed-size layout; the union of all monitors and then
+    // the bubble itself stand in only when no monitor is found.
+    let bounds = bubble::work_area_of(&bubble)
+        .or_else(|| virtual_screen(&runtime::monitor_rects(app)))
+        .unwrap_or(anchor);
     let target = geom::place_near(anchor, panel_size, bounds);
     // Move first so a DPI change from crossing monitors resizes the window
     // before the explicit size, then place it again at the final size.

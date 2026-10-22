@@ -183,30 +183,42 @@ fn screens(app: &AppHandle) -> Vec<Screen> {
 
 /// The primary screen, else the first one, else a 1920x1080 stand-in.
 fn primary_screen(app: &AppHandle, screens: &[Screen]) -> Screen {
+    primary_monitor_screen(app, screens).unwrap_or(FALLBACK)
+}
+
+/// The primary screen, else the first one; `None` without any monitor.
+fn primary_monitor_screen(app: &AppHandle, screens: &[Screen]) -> Option<Screen> {
     match app.primary_monitor() {
-        Ok(Some(monitor)) => Screen::of(&monitor),
-        Ok(None) => screens.first().copied().unwrap_or(FALLBACK),
+        Ok(Some(monitor)) => Some(Screen::of(&monitor)),
+        Ok(None) => screens.first().copied(),
         Err(err) => {
             log::warn!("primary monitor unavailable: {err}");
-            screens.first().copied().unwrap_or(FALLBACK)
+            screens.first().copied()
         }
     }
 }
 
-/// The screen a window is on (Win32 picks the nearest), else the primary.
+/// The screen a window is on (Win32 picks the nearest), else the primary,
+/// else a 1920x1080 stand-in.
 fn screen_of(window: &WebviewWindow) -> Screen {
+    monitor_screen_of(window).unwrap_or(FALLBACK)
+}
+
+/// The screen a window is on, else the primary; `None` without any monitor.
+fn monitor_screen_of(window: &WebviewWindow) -> Option<Screen> {
     match window.current_monitor() {
-        Ok(Some(monitor)) => Screen::of(&monitor),
-        Ok(None) => {
-            let app = window.app_handle();
-            primary_screen(app, &screens(app))
-        }
-        Err(err) => {
-            log::warn!("monitor of {} unavailable: {err}", window.label());
-            let app = window.app_handle();
-            primary_screen(app, &screens(app))
-        }
+        Ok(Some(monitor)) => return Some(Screen::of(&monitor)),
+        Ok(None) => {}
+        Err(err) => log::warn!("monitor of {} unavailable: {err}", window.label()),
     }
+    let app = window.app_handle();
+    primary_monitor_screen(app, &screens(app))
+}
+
+/// Work area of the monitor `window` is on, else of the primary; `None`
+/// when no monitor can be found.
+pub(crate) fn work_area_of(window: &WebviewWindow) -> Option<Rect> {
+    monitor_screen_of(window).map(|s| s.work)
 }
 
 fn outer_rect(window: &WebviewWindow) -> Option<Rect> {
@@ -527,20 +539,9 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
                 }
             });
         }
-        // tao reports "no preference" and an unreachable portal as light, so
-        // the portal is read again and only a stated preference applies.
-        #[cfg(target_os = "linux")]
-        WindowEvent::ThemeChanged(_) => {
-            let app = window.app_handle().clone();
-            defer("bubble-theme", move || {
-                let Some(is_dark) = platform::linux::portal_prefers_dark() else {
-                    return;
-                };
-                if let Some(runtime) = runtime_of(&app) {
-                    runtime.set_dark(is_dark);
-                }
-            });
-        }
+        // On Linux tao sends ThemeChanged with a placeholder window id that
+        // tauri drops, so it never arrives here; `platform::linux_theme`
+        // follows the portal's SettingChanged signal instead.
         _ => {}
     }
 }
@@ -663,20 +664,30 @@ fn reclamp(app: &AppHandle, provider: ProviderId) {
 }
 
 /// Resize every bubble to `size_logical` around its own centre, at its own
-/// DPI. Nothing snaps and no position is saved.
-pub fn resize_all(app: &AppHandle, size_logical: i32) {
+/// DPI, kept inside the work area of the monitor it was on. Nothing snaps
+/// and nothing is saved here; returns where each moved bubble now is, empty
+/// where windows cannot be positioned.
+pub fn resize_all(app: &AppHandle, size_logical: i32) -> Vec<(ProviderId, Point)> {
     let placeable = platform::positioning_supported();
-    for (_, window) in windows(app) {
+    let mut moved = Vec::new();
+    for (provider, window) in windows(app) {
         let Some(rect) = outer_rect(&window) else {
             continue;
         };
+        // The monitor before the resize: a bubble grown past an edge may
+        // overlap a neighbour more than its own monitor afterwards.
+        let work = screen_of(&window).work;
         let (w, h) = geom::bubble_size_px(size_logical, dpi_of(&window));
         let (cx, cy) = ((rect.l + rect.r) / 2, (rect.t + rect.b) / 2);
         set_size(&window, (w, h));
         if placeable {
-            set_position(&window, Point::new(cx - w / 2, cy - h / 2));
+            let centred = Rect::from_xywh(cx - w / 2, cy - h / 2, w, h);
+            let pos = geom::clamp_into_work_area(centred, work, provider);
+            set_position(&window, pos);
+            moved.push((provider, pos));
         }
     }
+    moved
 }
 
 /// Move every bubble to its default spot on the primary screen. The
