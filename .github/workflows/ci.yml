@@ -4,13 +4,23 @@ on:
   push:
     branches: [main, feat/tauri-port]
   pull_request:
+  # The release workflow runs this on the tag before it builds anything.
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to check out and test (defaults to the triggering commit)'
+        type: string
+        required: false
 
 permissions:
   contents: read
 
+# A called run takes the caller's workflow name and the ref it was given, so
+# it never shares a group with a push or PR run. It is never cancelled
+# either: a newer push must not abort the checks a release waits on.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: ${{ !inputs.ref }}
 
 jobs:
   build:
@@ -22,6 +32,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -88,6 +100,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 

@@ -73,9 +73,19 @@ jobs:
             exit 1
           fi
 
+  # Nothing is built for release from a tag whose sources fail CI.
+  verify:
+    name: CI on the tag
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+
   win-x64:
     name: Windows x64
-    needs: prepare
+    needs: [prepare, verify]
     runs-on: windows-latest
     # The updater signing key decides what every installed client will
     # install, so only the steps that check or use it see it: never
@@ -135,7 +145,7 @@ jobs:
 
   linux-x64:
     name: Linux x64
-    needs: prepare
+    needs: [prepare, verify]
     runs-on: ubuntu-22.04
     # As on Windows, only the steps that check or use the signing key see it.
     steps:

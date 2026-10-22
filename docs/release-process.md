@@ -48,15 +48,19 @@ update again.
 1. Bump `Cargo.toml` `version` (`X.Y.Z`).
 2. Run `cargo build` locally to refresh `Cargo.lock`.
 3. Commit: `chore: bump version to X.Y.Z`.
-4. Tag and push:
+4. Push `main`, wait for its "CI" run to pass, then tag and push the
+   tag:
 
    ```powershell
-   git tag -a vX.Y.Z -m "vX.Y.Z"
    git push origin main
+   # wait for the CI run on main to go green
+   git tag -a vX.Y.Z -m "vX.Y.Z"
    git push origin vX.Y.Z
    ```
 
-5. Watch the "Release" workflow run. It creates a non-draft,
+5. Watch the "Release" workflow run. It first runs the full CI
+   (`ci.yml`) on the tag and builds nothing unless that passes. It then
+   creates a non-draft,
    non-prerelease GitHub Release marked latest, with auto-generated
    notes and the assets listed below, then fails if
    `/releases/latest` does not return the new tag.
